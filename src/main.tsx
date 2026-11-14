@@ -4,6 +4,7 @@ import './style.css';
 import WorkoutEditor from './WorkoutEditor';
 import ProgramEditor from './ProgramEditor';
 import PlanningCalendar from './PlanningCalendar';
+import SessionExecution, {type Execution} from './SessionExecution';
 
 type Tab = 'Accueil' | 'Séance' | 'Programmes' | 'Stats' | 'Plus';
 const tabs: { label: Tab; icon: string }[] = [
@@ -88,7 +89,7 @@ type TrainingProgram = {
 };
 type PlannedWorkout = {
   id: string; date: string; templateId: string; programId: string | null;
-  status: 'planned' | 'cancelled'; createdAt: string; updatedAt: string;
+  status: 'planned' | 'cancelled' | 'completed' | 'partial' | 'abandoned'; createdAt: string; updatedAt: string;
 };
 const MAX_PLANNING_RECORDS = 1000;
 function validIsoDate(v: unknown): v is string {
@@ -131,7 +132,7 @@ function validPlanned(x: unknown): x is PlannedWorkout {
   return typeof p.id === 'string' && p.id.length > 0 && p.id.length <= 128 &&
     validIsoDate(p.date) && typeof p.templateId === 'string' && !!p.templateId && p.templateId.length <= 128 &&
     (p.programId === null || (typeof p.programId === 'string' && p.programId.length > 0 && p.programId.length <= 128)) &&
-    (p.status === 'planned' || p.status === 'cancelled') && validDate(p.createdAt) && validDate(p.updatedAt);
+    (['planned','cancelled','completed','partial','abandoned'].includes(p.status)) && validDate(p.createdAt) && validDate(p.updatedAt);
 }
 function validPlanning(templates: unknown, programs: unknown, planned: unknown): boolean {
   if (!Array.isArray(templates) || !Array.isArray(programs) || !Array.isArray(planned) ||
@@ -170,8 +171,8 @@ type Theme = 'dark' | 'light' | 'system';
 type LocalProfile = { id: string; name: string; createdAt: string; updatedAt: string };
 type LocalSettings = { id: string; profileId: string; theme: Theme; updatedAt: string };
 const DB_NAME = 'lifetrack-training';
-const DB_VERSION = 4;
-const DATA_SCHEMA_VERSION = 3; // Format logique des données, indépendant de la version IndexedDB.
+const DB_VERSION = 5;
+const DATA_SCHEMA_VERSION = 4; // Format logique des données, indépendant de la version IndexedDB.
 type SchemaMetadata = { id: 'schema'; version: number; updatedAt: string };
 const SETTINGS_KEY = 'preferences';
 function openDatabase(): Promise<IDBDatabase> {
@@ -183,7 +184,7 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('profiles')) db.createObjectStore('profiles', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('customExercises')) db.createObjectStore('customExercises', { keyPath: 'id' });
-      for (const store of ['workoutTemplates','trainingPrograms','plannedWorkouts']) {
+      for (const store of ['workoutTemplates','trainingPrograms','plannedWorkouts','executions']) {
         if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' });
       }
       // Migration additive : aucun effacement des profils ni des préférences existants.
@@ -274,7 +275,7 @@ async function loadLocalData(): Promise<{ db: IDBDatabase; profile: LocalProfile
 }
 // Lot 1-E.2 : sauvegarde portable et restauration transactionnelle.
 const BACKUP_FORMAT = 'lifetrack-training-backup';
-const BACKUP_VERSION = 3;
+const BACKUP_VERSION = 4;
 type BackupDocument = {
   format: typeof BACKUP_FORMAT;
   version: number;
@@ -286,14 +287,27 @@ type BackupDocument = {
   workoutTemplates?: WorkoutTemplate[];
   trainingPrograms?: TrainingProgram[];
   plannedWorkouts?: PlannedWorkout[];
+  executions?: Execution[];
 };
 function validDate(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
 }
+function validExecution(v: unknown): v is Execution {
+ if (!v || typeof v!=='object' || Array.isArray(v)) return false;
+ const x=v as Execution;
+ return typeof x.id==='string' && x.id.startsWith('execution:') && x.id.length<=128 &&
+ typeof x.templateId==='string' && typeof x.name==='string' && x.name.length<=100 &&
+ (x.plannedId===null||typeof x.plannedId==='string') && Array.isArray(x.targets) && x.targets.length<=200 && x.targets.every(validTarget) &&
+ validDate(x.startedAt)&&validDate(x.updatedAt)&&validDate(x.lastTick)&&(x.endedAt===null||validDate(x.endedAt)) &&
+ ['active','paused','completed','partial','abandoned'].includes(x.status) &&
+ [x.activeMs,x.pauseMs].every(n=>Number.isFinite(n)&&n>=0&&n<=864000000) &&
+ Array.isArray(x.completedIndexes) && x.completedIndexes.every(i=>Number.isInteger(i)&&i>=0&&i<x.targets.length) &&
+ new Set(x.completedIndexes).size===x.completedIndexes.length && typeof x.manualDuration==='boolean';
+}
 function validateBackup(value: unknown): BackupDocument {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Fichier JSON invalide.');
   const raw = value as Record<string, unknown>;
-  if (raw.format !== BACKUP_FORMAT || ![1, 2, BACKUP_VERSION].includes(Number(raw.version)) || ![1, 2, DATA_SCHEMA_VERSION].includes(Number(raw.dataSchemaVersion))) {
+  if (raw.format !== BACKUP_FORMAT || ![1, 2, 3, BACKUP_VERSION].includes(Number(raw.version)) || ![1, 2, 3, DATA_SCHEMA_VERSION].includes(Number(raw.dataSchemaVersion))) {
     throw new Error('Format ou version de sauvegarde incompatible. Aucune donnée modifiée.');
   }
   if (!validDate(raw.exportedAt)) throw new Error('Date d’export invalide.');
@@ -310,14 +324,15 @@ function validateBackup(value: unknown): BackupDocument {
       !['dark', 'light', 'system'].includes(String(pref.theme)) || !validDate(pref.updatedAt)) {
     throw new Error('Préférences de sauvegarde invalides.');
   }
-  if ((raw.version === 2 || raw.version === 3) && (raw.dataSchemaVersion !== (raw.version === 2 ? 2 : 3) || !Array.isArray(raw.customExercises) ||
+  if ((raw.version >= 2) && (raw.dataSchemaVersion !== raw.version || !Array.isArray(raw.customExercises) ||
       raw.customExercises.length > 500 || !raw.customExercises.every(validExercise) ||
       new Set((raw.customExercises as Exercise[]).map(e=>e.id)).size !== raw.customExercises.length)) {
     throw new Error('Bibliothèque personnalisée de sauvegarde invalide.');
   }
-  if (raw.version === 3 && !validPlanning(raw.workoutTemplates,raw.trainingPrograms,raw.plannedWorkouts)) {
+  if (raw.version >= 3 && !validPlanning(raw.workoutTemplates,raw.trainingPrograms,raw.plannedWorkouts)) {
     throw new Error('Données de programmes de sauvegarde invalides.');
   }
+  if (raw.version === 4 && (!Array.isArray(raw.executions) || raw.executions.length > 3000 || !raw.executions.every(validExecution))) throw new Error('Historique des séances invalide.');
   if (raw.version === 1 && raw.dataSchemaVersion !== 1) throw new Error('Ancien schéma JSON incompatible.');
   return raw as unknown as BackupDocument;
 }
@@ -325,7 +340,7 @@ function restoreBackup(db: IDBDatabase, backup: BackupDocument): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       // Une seule transaction : aucun état partiellement restauré en cas d'échec.
-      const tx = db.transaction(['profiles', 'settings', 'customExercises', 'workoutTemplates', 'trainingPrograms', 'plannedWorkouts'], 'readwrite');
+      const tx = db.transaction(['profiles', 'settings', 'customExercises', 'workoutTemplates', 'trainingPrograms', 'plannedWorkouts', 'executions'], 'readwrite');
       const profiles = tx.objectStore('profiles');
       const settings = tx.objectStore('settings');
       profiles.clear();
@@ -337,7 +352,7 @@ function restoreBackup(db: IDBDatabase, backup: BackupDocument): Promise<void> {
         for (const exercise of backup.customExercises || []) exercises.put(exercise);
       }
       // Les anciennes sauvegardes conservent le planning local actuel.
-      if (backup.version === 3) {
+      if (backup.version >= 3) {
         for (const [store, items] of [
           ['workoutTemplates', backup.workoutTemplates || []],
           ['trainingPrograms', backup.trainingPrograms || []],
@@ -347,6 +362,7 @@ function restoreBackup(db: IDBDatabase, backup: BackupDocument): Promise<void> {
           for (const item of items) target.put(item);
         }
       }
+      if (backup.version === 4) { const target=tx.objectStore('executions'); target.clear(); for(const item of backup.executions||[])target.put(item); }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Restauration impossible.'));
       tx.onabort = () => reject(tx.error || new Error('Restauration annulée.'));
@@ -359,6 +375,7 @@ function describeError(error: unknown): string {
 
 function App() {
   const [tab, setTab] = useState<Tab>('Accueil');
+  const [requestedPlan,setRequestedPlan] = useState<string|null>(null);
   const [showLibrary, setShowLibrary] = useState(false);
   const [customExercises, setCustomExercises] = useState<Exercise[]>([]);
   const [planningCounts, setPlanningCounts] = useState({templates:0, programs:0, planned:0});
@@ -596,7 +613,7 @@ function App() {
         format: BACKUP_FORMAT, version: BACKUP_VERSION,
         exportedAt: new Date().toISOString(), dataSchemaVersion: DATA_SCHEMA_VERSION,
         profile: profiles[0], settings: storedSettings, customExercises: exercisesToExport,
-        workoutTemplates: planning.templates, trainingPrograms: planning.programs, plannedWorkouts: planning.planned,
+        workoutTemplates: planning.templates, trainingPrograms: planning.programs, plannedWorkouts: planning.planned, executions: await readAll<Execution>(dbRef.current,'executions'),
       };
       validateBackup(backup);
       const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
@@ -620,7 +637,7 @@ function App() {
       const libraryWarning = backup.version >= 2
         ? `La bibliothèque personnalisée actuelle sera remplacée par ${backup.customExercises?.length ?? 0} exercice(s) du fichier.`
         : 'Ancienne sauvegarde : les exercices personnalisés actuels seront conservés.';
-      const planningWarning = backup.version === 3
+      const planningWarning = backup.version >= 3
         ? 'Les séances types, programmes et affectations locales seront remplacés.'
         : 'Les séances types, programmes et affectations locales seront conservés.';
       if (!window.confirm(`Restaurer le profil « ${backup.profile.name} » et son thème ?\n\n${libraryWarning}\n${planningWarning}\n\nExporte une sauvegarde de l’état actuel avant de continuer.`)) {
@@ -645,7 +662,7 @@ function App() {
       }
       setCustomExercises(restoredExercises);
       const verifiedPlanning = await readPlanning(dbRef.current);
-      if (backup.version === 3 && (JSON.stringify(verifiedPlanning.templates) !== JSON.stringify(backup.workoutTemplates) ||
+      if (backup.version >= 3 && (JSON.stringify(verifiedPlanning.templates) !== JSON.stringify(backup.workoutTemplates) ||
           JSON.stringify(verifiedPlanning.programs) !== JSON.stringify(backup.trainingPrograms) ||
           JSON.stringify(verifiedPlanning.planned) !== JSON.stringify(backup.plannedWorkouts))) {
         throw new Error('Contrôle de relecture du planning non conforme.');
@@ -720,8 +737,8 @@ function App() {
             <div className="metrics"><div className="metric"><span>Séances</span><strong>3<span>/4</span></strong><small>prévues</small></div><div className="metric"><span>Durée</span><strong>2h 35</strong><small>entraînement</small></div><div className="metric"><span>Séries</span><strong>42</strong><small>validées</small></div></div>
             <div className="panel"><div className="panel-heading"><h2>Programme</h2><button className="text-button" onClick={() => navigate('Programmes')}>Calendrier →</button></div><div className="timeline"><span className="timeline-dot"/><div><strong>Demain · Cardio</strong><p>Vélo · 40 min · séance planifiée</p></div></div><div className="timeline"><span className="timeline-dot lime"/><div><strong>Samedi · Full body</strong><p>Musculation · 60 min</p></div></div></div>
           </section>}
-          {!showProfile && !showLibrary && tab === 'Séance' && <section><div className="section-head"><div><p className="kicker">ENTRAÎNEMENT</p><h1>Séance</h1><p className="muted">Prépare et retrouve tes entraînements.</p></div></div><div className="panel highlighted"><span className="pill">SÉANCE DU JOUR · EXEMPLE</span><h2>Haut du corps</h2><p className="muted">6 exercices · 18 séries · repos personnalisés</p><div className="exercise-list"><div><span>01</span> Développé debout <small>3 × 10</small></div><div><span>02</span> Tirage horizontal <small>3 × 10</small></div><div><span>03</span> Curl biceps <small>3 × 12</small></div></div><div className="disabled-action">Démarrage disponible dans un prochain lot</div></div><div className="panel"><h2>Séance libre</h2><p className="muted">Musculation, cardio ou copie d'une séance existante.</p><div className="disabled-action">Création disponible dans un prochain lot</div></div></section>}
-          {!showProfile && !showLibrary && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><PlanningCalendar db={storageStatus === 'ready' ? dbRef.current : null} onChange={()=>{if(dbRef.current)void readPlanning(dbRef.current).then(data=>setPlanningCounts({templates:data.templates.length,programs:data.programs.length,planned:data.planned.length})).catch(error=>setStorageError(describeError(error)))}}/><WorkoutEditor db={storageStatus === 'ready' ? dbRef.current : null} exercises={allLibraryExercises} onChange={()=>{if(dbRef.current)void readPlanning(dbRef.current).then(data=>setPlanningCounts({templates:data.templates.length,programs:data.programs.length,planned:data.planned.length})).catch(error=>setStorageError(describeError(error)))}}/><ProgramEditor db={storageStatus === 'ready' ? dbRef.current : null} onChange={()=>{if(dbRef.current)void readPlanning(dbRef.current).then(data=>setPlanningCounts({templates:data.templates.length,programs:data.programs.length,planned:data.planned.length})).catch(error=>setStorageError(describeError(error)))}}/><div className="panel"><p className="muted small">Fondations 2-B.1 : {planningCounts.templates} séance(s) type(s) · {planningCounts.programs} programme(s) · {planningCounts.planned} affectation(s) datée(s) enregistrées.</p></div></section>}
+          {!showProfile && !showLibrary && tab === 'Séance' && <section><div className="section-head"><div><p className="kicker">ENTRAÎNEMENT</p><h1>Séance</h1><p className="muted">Prépare et retrouve tes entraînements.</p></div></div><div className="panel highlighted"><span className="pill">SÉANCE DU JOUR · EXEMPLE</span><h2>Haut du corps</h2><p className="muted">6 exercices · 18 séries · repos personnalisés</p><div className="exercise-list"><div><span>01</span> Développé debout <small>3 × 10</small></div><div><span>02</span> Tirage horizontal <small>3 × 10</small></div><div><span>03</span> Curl biceps <small>3 × 12</small></div></div><p className="muted small">Choisis une séance type ou une planification ci-dessous.</p></div><SessionExecution db={storageStatus === 'ready' ? dbRef.current : null} exercises={allLibraryExercises} requestedPlan={requestedPlan} onPlanConsumed={()=>setRequestedPlan(null)}/><div className="panel"><h2>Séance libre</h2><p className="muted">Musculation, cardio ou copie d'une séance existante.</p><div className="disabled-action">Création disponible dans un prochain lot</div></div></section>}
+          {!showProfile && !showLibrary && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><PlanningCalendar onStart={id=>{setRequestedPlan(id);navigate('Séance')}} db={storageStatus === 'ready' ? dbRef.current : null} onChange={()=>{if(dbRef.current)void readPlanning(dbRef.current).then(data=>setPlanningCounts({templates:data.templates.length,programs:data.programs.length,planned:data.planned.length})).catch(error=>setStorageError(describeError(error)))}}/><WorkoutEditor db={storageStatus === 'ready' ? dbRef.current : null} exercises={allLibraryExercises} onChange={()=>{if(dbRef.current)void readPlanning(dbRef.current).then(data=>setPlanningCounts({templates:data.templates.length,programs:data.programs.length,planned:data.planned.length})).catch(error=>setStorageError(describeError(error)))}}/><ProgramEditor db={storageStatus === 'ready' ? dbRef.current : null} onChange={()=>{if(dbRef.current)void readPlanning(dbRef.current).then(data=>setPlanningCounts({templates:data.templates.length,programs:data.programs.length,planned:data.planned.length})).catch(error=>setStorageError(describeError(error)))}}/><div className="panel"><p className="muted small">Fondations 2-B.1 : {planningCounts.templates} séance(s) type(s) · {planningCounts.programs} programme(s) · {planningCounts.planned} affectation(s) datée(s) enregistrées.</p></div></section>}
           {!showProfile && !showLibrary && tab === 'Stats' && <section><div className="section-head"><div><p className="kicker">ANALYSES</p><h1>Statistiques</h1><p className="muted">Suivi de la progression et répartition musculaire.</p></div></div><div className="metrics"><div className="metric"><span>Volume</span><strong>42</strong><small>séries · exemple</small></div><div className="metric"><span>Cardio</span><strong>85</strong><small>minutes · exemple</small></div></div><div className="panel"><h2>Progression récente</h2><p className="muted small">Illustration sans données réelles</p><div className="bars" aria-label="Graphique illustratif"><span style={{height:'38%'}}/><span style={{height:'51%'}}/><span style={{height:'47%'}}/><span style={{height:'70%'}}/><span style={{height:'65%'}}/><span style={{height:'83%'}}/><span style={{height:'94%'}}/></div></div><div className="panel"><h2>Analyse musculaire</h2><p className="muted">Carte corporelle interactive, séries directes et secondaires pondérées : intégration prévue dans les lots fonctionnels.</p><div className="disabled-action">Analyse indisponible dans cette démonstration</div></div></section>}
           {!showProfile && !showLibrary && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel"><button className="menu-item menu-button" onClick={()=>setShowLibrary(true)}><div><strong>Bibliothèque d’exercices</strong><p className="muted">{STANDARD_EXERCISES.length} exercices préchargés · Création et édition</p></div><span>→</span></button>{[['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>Sauvegarde et restauration</h2><p className="muted small">Sauvegarde JSON locale du profil, du thème et des exercices personnalisés. Aucun transfert vers un serveur. Enregistre une copie du fichier dans Fichiers ou sur un autre support.</p><div className="profile-actions"><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={exportBackup}>Exporter JSON</button><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={() => backupInputRef.current?.click()}>Restaurer un JSON</button><input ref={backupInputRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={event => { void importBackup(event.target.files?.[0]); }} aria-label="Choisir un fichier de sauvegarde JSON" /></div><p className="muted small" role="status">{backupBusy ? 'Traitement en cours…' : backupMessage || 'Avant toute restauration, exporte une sauvegarde de l’état actuel.'}</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 2-B.3.2</p><p className="muted small">{pwaStatus}</p><button type="button" className="secondary-button" disabled={checkingUpdate} onClick={() => void checkUpdateManually()}>{checkingUpdate ? "Vérification…" : "Rechercher une mise à jour"}</button><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
         </main>
