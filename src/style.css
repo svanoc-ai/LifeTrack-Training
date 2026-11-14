@@ -98,3 +98,17 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .training-modal .template-editor .profile-actions{margin-top:20px}
 @media(min-width:850px){.training-modal-backdrop{align-items:center}.training-modal{max-height:85dvh}}
 @media(max-width:390px){.week-buttons{flex-wrap:wrap!important}.week-jump .profile-input{min-width:0;width:100%}.training-modal{padding:18px 15px}}
+
+/* Lot 2-B.4.2.1 — largeur du champ date natif iOS dans la modale */
+.training-modal,
+.training-modal .template-editor,
+.training-modal .field-label { min-width: 0; max-width: 100%; }
+.training-modal .field-label { display: block; }
+.training-modal input[type="date"].profile-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  -webkit-min-logical-width: 0;
+}
