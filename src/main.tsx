@@ -18,7 +18,9 @@ type Theme = 'dark' | 'light' | 'system';
 type LocalProfile = { id: string; name: string; createdAt: string; updatedAt: string };
 type LocalSettings = { id: string; profileId: string; theme: Theme; updatedAt: string };
 const DB_NAME = 'lifetrack-training';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const DATA_SCHEMA_VERSION = 1; // Format logique des données, indépendant de la version IndexedDB.
+type SchemaMetadata = { id: 'schema'; version: number; updatedAt: string };
 const SETTINGS_KEY = 'preferences';
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -28,28 +30,49 @@ function openDatabase(): Promise<IDBDatabase> {
       const db = request.result;
       if (!db.objectStoreNames.contains('profiles')) db.createObjectStore('profiles', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'id' });
+      // Migration additive : aucun effacement des profils ni des préférences existants.
+      const meta = db.objectStoreNames.contains('metadata')
+        ? request.transaction!.objectStore('metadata')
+        : db.createObjectStore('metadata', { keyPath: 'id' });
+      meta.put({ id: 'schema', version: DATA_SCHEMA_VERSION, updatedAt: new Date().toISOString() } satisfies SchemaMetadata);
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        window.dispatchEvent(new Event('lifetrack-database-versionchange'));
+      };
+      resolve(db);
+    };
     request.onerror = () => reject(request.error || new Error('Ouverture de la base impossible.'));
     request.onblocked = () => reject(new Error('Base bloquée par un autre onglet. Ferme les autres onglets puis réessaie.'));
   });
 }
 function readRecord<T>(db: IDBDatabase, storeName: string, key: string): Promise<T | undefined> {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const request = tx.objectStore(storeName).get(key);
-    request.onsuccess = () => resolve(request.result as T | undefined);
-    request.onerror = () => reject(request.error || new Error('Lecture locale impossible.'));
-    tx.onabort = () => reject(tx.error || new Error('Lecture interrompue.'));
+    let value: T | undefined;
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction(storeName, 'readonly');
+      const request = tx.objectStore(storeName).get(key);
+      request.onsuccess = () => { value = request.result as T | undefined; };
+      tx.oncomplete = () => resolve(value);
+      tx.onerror = () => reject(tx.error || new Error('Lecture locale impossible.'));
+      tx.onabort = () => reject(tx.error || new Error('Lecture interrompue.'));
+    } catch (error) { reject(error); }
   });
 }
 function readProfiles(db: IDBDatabase): Promise<LocalProfile[]> {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction('profiles', 'readonly');
-    const request = tx.objectStore('profiles').getAll();
-    request.onsuccess = () => resolve(request.result as LocalProfile[]);
-    request.onerror = () => reject(request.error || new Error('Lecture du profil impossible.'));
-    tx.onabort = () => reject(tx.error || new Error('Lecture interrompue.'));
+    let profiles: LocalProfile[] = [];
+    try {
+      const tx = db.transaction('profiles', 'readonly');
+      const request = tx.objectStore('profiles').getAll();
+      request.onsuccess = () => { profiles = request.result as LocalProfile[]; };
+      tx.oncomplete = () => resolve(profiles);
+      tx.onerror = () => reject(tx.error || new Error('Lecture du profil impossible.'));
+      tx.onabort = () => reject(tx.error || new Error('Lecture interrompue.'));
+    } catch (error) { reject(error); }
   });
 }
 function writeRecord(db: IDBDatabase, storeName: string, record: LocalProfile | LocalSettings): Promise<void> {
@@ -70,6 +93,10 @@ function makeId(): string {
 async function loadLocalData(): Promise<{ db: IDBDatabase; profile: LocalProfile; settings: LocalSettings }> {
   const db = await openDatabase();
   try {
+    const metadata = await readRecord<SchemaMetadata>(db, 'metadata', 'schema');
+    if (!metadata || metadata.version !== DATA_SCHEMA_VERSION) {
+      throw new Error('Version du schéma local non reconnue. Aucune donnée n’a été modifiée.');
+    }
     const profiles = await readProfiles(db);
     if (profiles.length > 1) throw new Error('Plusieurs profils détectés : sélection multiprofil non disponible en V0.1.');
     let profile = profiles[0];
@@ -130,6 +157,15 @@ function App() {
   const [storageError, setStorageError] = useState('');
   const [saving, setSaving] = useState(false);
   const dbRef = React.useRef<IDBDatabase | null>(null);
+  React.useEffect(() => {
+    const onVersionChange = () => {
+      dbRef.current = null;
+      setStorageStatus('error');
+      setStorageError('La base locale a changé dans un autre onglet. Recharge cette page avant toute modification.');
+    };
+    window.addEventListener('lifetrack-database-versionchange', onVersionChange);
+    return () => window.removeEventListener('lifetrack-database-versionchange', onVersionChange);
+  }, []);
   const [storageDetail, setStorageDetail] = useState('');
   React.useEffect(() => {
     let cancelled = false;
@@ -140,7 +176,7 @@ function App() {
       setProfileName(storedProfile.name);
       setTheme(settings.theme);
       setStorageStatus('ready');
-      setStorageDetail('Lecture initiale vérifiée · profil ' + storedProfile.id.slice(0, 8));
+      setStorageDetail('Schéma ' + DATA_SCHEMA_VERSION + ' vérifié · profil ' + storedProfile.id.slice(0, 8));
     }).catch(error => {
       if (!cancelled) { setStorageError(describeError(error)); setStorageStatus('error'); }
     });
@@ -185,7 +221,7 @@ function App() {
       <aside className="sidebar" aria-label="Navigation principale">
         <div className="brand"><span className="brand-icon">LT</span><span><strong>LifeTrack</strong><small>TRAINING</small></span></div>
         <nav>{tabs.map(item => <button key={item.label} type="button" className={`side-link ${tab === item.label && !showProfile ? 'active' : ''}`} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}</nav>
-        <div className="sidebar-foot">V0.1 · Lot 1-D<br/>PWA · Hors ligne</div>
+        <div className="sidebar-foot">V0.1 · Lot 1-E.1<br/>PWA · Hors ligne</div>
       </aside>
       <div className="main-column">
         <header className="topbar">
@@ -209,7 +245,7 @@ function App() {
           {!showProfile && tab === 'Séance' && <section><div className="section-head"><div><p className="kicker">ENTRAÎNEMENT</p><h1>Séance</h1><p className="muted">Prépare et retrouve tes entraînements.</p></div></div><div className="panel highlighted"><span className="pill">SÉANCE DU JOUR · EXEMPLE</span><h2>Haut du corps</h2><p className="muted">6 exercices · 18 séries · repos personnalisés</p><div className="exercise-list"><div><span>01</span> Développé debout <small>3 × 10</small></div><div><span>02</span> Tirage horizontal <small>3 × 10</small></div><div><span>03</span> Curl biceps <small>3 × 12</small></div></div><div className="disabled-action">Démarrage disponible dans un prochain lot</div></div><div className="panel"><h2>Séance libre</h2><p className="muted">Musculation, cardio ou copie d'une séance existante.</p><div className="disabled-action">Création disponible dans un prochain lot</div></div></section>}
           {!showProfile && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><div className="panel"><div className="panel-heading"><h2>Semaine {week === 0 ? 'en cours' : week > 0 ? `+${week}` : week}</h2><div className="week-buttons"><button aria-label="Semaine précédente" onClick={() => setWeek(v => v - 1)}>‹</button><button aria-label="Semaine suivante" onClick={() => setWeek(v => v + 1)}>›</button></div></div><div className="calendar">{['L','M','M','J','V','S','D'].map((day, i) => <div className="calendar-day" key={`${day}-${i}`}><span>{day}</span><strong>{i + 9 + week * 7}</strong>{week === 0 && [1,3,5].includes(i) && <i className={i === 3 ? 'blue' : ''}/>}</div>)}</div><p className="muted small">Aperçu fictif du calendrier. Les dates et séances réelles seront calculées ultérieurement.</p></div><div className="panel"><h2>Programmes actifs</h2><div className="program"><div><strong>Cycle force & progression</strong><p className="muted">Exemple · 8 semaines</p></div><span className="pill">Semaine 3/8</span></div><div className="disabled-action">Éditeur disponible dans un prochain lot</div></div></section>}
           {!showProfile && tab === 'Stats' && <section><div className="section-head"><div><p className="kicker">ANALYSES</p><h1>Statistiques</h1><p className="muted">Suivi de la progression et répartition musculaire.</p></div></div><div className="metrics"><div className="metric"><span>Volume</span><strong>42</strong><small>séries · exemple</small></div><div className="metric"><span>Cardio</span><strong>85</strong><small>minutes · exemple</small></div></div><div className="panel"><h2>Progression récente</h2><p className="muted small">Illustration sans données réelles</p><div className="bars" aria-label="Graphique illustratif"><span style={{height:'38%'}}/><span style={{height:'51%'}}/><span style={{height:'47%'}}/><span style={{height:'70%'}}/><span style={{height:'65%'}}/><span style={{height:'83%'}}/><span style={{height:'94%'}}/></div></div><div className="panel"><h2>Analyse musculaire</h2><p className="muted">Carte corporelle interactive, séries directes et secondaires pondérées : intégration prévue dans les lots fonctionnels.</p><div className="disabled-action">Analyse indisponible dans cette démonstration</div></div></section>}
-          {!showProfile && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel">{[['Bibliothèque d’exercices','Exercices et variantes'],['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 1-D</p><p className="muted small">{pwaStatus}</p><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
+          {!showProfile && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel">{[['Bibliothèque d’exercices','Exercices et variantes'],['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 1-E.1</p><p className="muted small">{pwaStatus}</p><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
         </main>
         <nav className="bottom-nav" aria-label="Navigation mobile">{tabs.map(item => <button type="button" key={item.label} className={tab === item.label && !showProfile ? 'active' : ''} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span><small>{item.label}</small></button>)}</nav>
       </div>
