@@ -102,6 +102,7 @@ function App() {
   const [storageError, setStorageError] = useState('');
   const [saving, setSaving] = useState(false);
   const dbRef = React.useRef<IDBDatabase | null>(null);
+  const [storageDetail, setStorageDetail] = useState('');
   React.useEffect(() => {
     let cancelled = false;
     loadLocalData().then(({ db, profile: storedProfile, settings }) => {
@@ -111,6 +112,7 @@ function App() {
       setProfileName(storedProfile.name);
       setTheme(settings.theme);
       setStorageStatus('ready');
+      setStorageDetail('Lecture initiale vérifiée · profil ' + storedProfile.id.slice(0, 8));
     }).catch(error => {
       if (!cancelled) { setStorageError(describeError(error)); setStorageStatus('error'); }
     });
@@ -122,7 +124,13 @@ function App() {
     if (!name || name.length > 60) { setStorageError('Le nom doit contenir entre 1 et 60 caractères.'); return; }
     setSaving(true); setStorageError('');
     const updated = { ...profile, name, updatedAt: new Date().toISOString() };
-    try { await writeRecord(dbRef.current, 'profiles', updated); setProfile(updated); }
+    try {
+      await writeRecord(dbRef.current, 'profiles', updated);
+      const verified = await readRecord<LocalProfile>(dbRef.current, 'profiles', updated.id);
+      if (!verified || verified.name !== updated.name) throw new Error('La relecture du nom ne correspond pas à la valeur enregistrée.');
+      setProfile(verified);
+      setStorageDetail('Nom enregistré et relu avec succès · ' + new Date().toLocaleTimeString('fr-FR'));
+    }
     catch (error) { setStorageError('Profil non enregistré : ' + describeError(error)); }
     finally { setSaving(false); }
   };
@@ -131,7 +139,10 @@ function App() {
     setSaving(true); setStorageError('');
     try {
       await writeRecord(dbRef.current, 'settings', { id: SETTINGS_KEY, profileId: profile.id, theme: next, updatedAt: new Date().toISOString() });
-      setTheme(next);
+      const verified = await readRecord<LocalSettings>(dbRef.current, 'settings', SETTINGS_KEY);
+      if (!verified || verified.theme !== next || verified.profileId !== profile.id) throw new Error('La relecture du thème ne correspond pas à la valeur enregistrée.');
+      setTheme(verified.theme);
+      setStorageDetail('Thème enregistré et relu avec succès · ' + new Date().toLocaleTimeString('fr-FR'));
     } catch (error) { setStorageError('Thème non enregistré : ' + describeError(error)); }
     finally { setSaving(false); }
   };
@@ -157,6 +168,7 @@ function App() {
         <main id="main" className="content">
           <div className="demo-note"><span className="demo-dot"/> Démonstration sportive · {storageStatus === 'ready' ? 'Profil et préférences enregistrés localement' : storageStatus === 'loading' ? 'Initialisation du stockage…' : 'Stockage indisponible'}</div>
           {storageError && <div className="storage-error" role="alert">{storageError}</div>}
+          {storageStatus === 'ready' && <p className="muted small" style={{margin:'4px 0 10px'}}>Diagnostic L1-C.1 : {storageDetail}</p>}
           {showProfile ? <section><div className="section-head"><div><p className="kicker">COMPTE LOCAL</p><h1>Profil</h1></div></div><div className="panel"><h2>Profil personnel</h2><p className="muted">Un seul profil local actif en V0.1. Les données sont associées à un identifiant stable, sans compte ni serveur.</p><label className="field-label" htmlFor="profile-name">Nom affiché</label><input className="profile-input" id="profile-name" type="text" maxLength={60} value={profileName} disabled={storageStatus !== 'ready' || saving} onChange={event => setProfileName(event.target.value)} /><div className="profile-actions"><button className="primary-button save-button" disabled={storageStatus !== 'ready' || saving || !profileName.trim() || profileName.trim() === profile?.name} onClick={saveProfile}>{saving ? 'Enregistrement…' : 'Enregistrer le nom'}</button><button className="secondary-button" onClick={() => setShowProfile(false)}>Retour</button></div><p className="muted small">Les informations corporelles et les objectifs sportifs seront ajoutés dans un lot ultérieur.</p></div></section> : null}
           {!showProfile && tab === 'Accueil' && <section>
             <div className="section-head"><div><p className="kicker">TABLEAU DE BORD</p><h1>Bonjour 👋</h1><p className="muted">Ton entraînement, en un coup d'œil.</p></div></div>
@@ -176,4 +188,4 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+ReactDOM.createRoot(document.getElementById('root')!).render(<App />);
