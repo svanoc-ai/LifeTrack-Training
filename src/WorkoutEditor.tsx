@@ -1,4 +1,4 @@
-import, {useEffect, useState} from 'react';
+import {useEffect, useState}from 'react';
 
 type Exercise = {id:string;name:string;kind:'musculation'|'cardio';archived:boolean};
 type Target = {exerciseId:string;order:number;sets?:number;reps?:number;loadKg?:number;restSeconds?:number;rir?:number;durationMinutes?:number;distanceKm?:number;supersetId?:string};
