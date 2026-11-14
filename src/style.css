@@ -52,3 +52,6 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .target-field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)}
 .target-field input{width:100%;min-width:0;font-size:16px}
 .template-editor .field-label{display:block}.template-editor textarea{resize:vertical}
+
+/* Lot 2-B.3.2 — planning hebdomadaire */
+.training-week{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin:16px 0}.training-day{min-width:0;border:1px solid var(--border, #c9d2d4);border-radius:12px;padding:10px}.training-day-head{display:flex;align-items:center;justify-content:space-between;gap:5px;flex-wrap:wrap}.training-event{margin-top:10px;padding:9px;border-radius:10px;background:var(--surface-2,rgba(128,128,128,.09));overflow-wrap:anywhere}.training-event .template-actions{flex-wrap:wrap}.training-day .text-button{font-size:.85rem}@media(max-width:850px){.training-week{grid-template-columns:1fr}.training-day{padding:12px}.training-day-head{flex-wrap:nowrap}}
