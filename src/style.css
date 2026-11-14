@@ -55,3 +55,31 @@ button:disabled{opacity:.55;cursor:not-allowed}
 
 /* Lot 2-B.3.2 — planning hebdomadaire */
 .training-week{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin:16px 0}.training-day{min-width:0;border:1px solid var(--border, #c9d2d4);border-radius:12px;padding:10px}.training-day-head{display:flex;align-items:center;justify-content:space-between;gap:5px;flex-wrap:wrap}.training-event{margin-top:10px;padding:9px;border-radius:10px;background:var(--surface-2,rgba(128,128,128,.09));overflow-wrap:anywhere}.training-event .template-actions{flex-wrap:wrap}.training-day .text-button{font-size:.85rem}@media(max-width:850px){.training-week{grid-template-columns:1fr}.training-day{padding:12px}.training-day-head{flex-wrap:nowrap}}
+
+/* Lot 2-B.4.1 — corrections responsive du calendrier, sans modification fonctionnelle */
+.training-week,.training-day,.training-event{min-width:0;max-width:100%}
+.training-event strong,.training-day-head strong{overflow-wrap:anywhere}
+.training-event .template-actions{display:flex;justify-content:flex-start;align-items:center;gap:8px 14px;flex-wrap:wrap}
+.training-event .template-actions .text-button{max-width:100%;white-space:normal;overflow-wrap:anywhere;text-align:left;line-height:1.35;padding:5px 0}
+.training-day-head .text-button{flex:0 0 auto;white-space:nowrap}
+.training-day-head strong{min-width:0}
+.training-week .profile-input,.training-week select{max-width:100%}
+@media(max-width:849px){
+ .training-week{grid-template-columns:minmax(0,1fr)}
+ .training-week .training-day{min-width:0}
+ .training-week .training-event{padding:10px}
+ .training-week .template-actions{justify-content:flex-start}
+ .training-week .template-actions button{font-size:12px;line-height:1.35}
+ .panel:has(> .training-week) > .panel-heading{display:flex;align-items:flex-start;flex-wrap:wrap;gap:12px}
+ .panel:has(> .training-week) > .panel-heading h2{flex:1 1 170px;min-width:0;overflow-wrap:anywhere}
+ .panel:has(> .training-week) > .panel-heading .week-buttons{display:flex;flex:0 1 auto;min-width:0;max-width:100%;gap:6px;align-items:center;flex-wrap:nowrap}
+ .panel:has(> .training-week) > .panel-heading .week-buttons button{flex:0 0 auto;min-width:36px;width:auto;min-height:38px;height:auto;padding:6px 10px;white-space:nowrap;line-height:1.25}
+ .panel:has(> .training-week) > .panel-heading .week-buttons button:nth-child(2){font-size:13px;font-weight:700;padding-inline:12px}
+ .panel:has(> .training-week) > .template-editor{min-width:0}
+ .panel:has(> .training-week) > .template-editor .profile-input{max-width:100%;min-width:0}
+}
+@media(max-width:390px){
+ .panel:has(> .training-week) > .panel-heading{display:block}
+ .panel:has(> .training-week) > .panel-heading h2{margin-bottom:12px}
+ .panel:has(> .training-week) > .panel-heading .week-buttons{justify-content:flex-start}
+}
