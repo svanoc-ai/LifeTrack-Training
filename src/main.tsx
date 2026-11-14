@@ -12,7 +12,7 @@ const tabs: { label: Tab; icon: string }[] = [
 ];
 
 
-// Lot 2-A.1 — Référentiel standard immuable ; personnalisations futures en IndexedDB.
+// Lot 2-A.2 — Référentiel standard immuable ; personnalisations futures en IndexedDB.
 type ExerciseKind = 'musculation' | 'cardio';
 type Exercise = { id: string; name: string; kind: ExerciseKind; muscles: string[]; equipment: string[]; measurement: 'series-repetitions' | 'duree-distance'; origin: 'standard' | 'custom'; archived: boolean; };
 const STANDARD_EXERCISES: Exercise[] = [
@@ -44,6 +44,17 @@ function readCustomExercises(db: IDBDatabase): Promise<Exercise[]> {
       tx.oncomplete=()=>resolve(result); tx.onerror=()=>reject(tx.error || new Error('Lecture exercices impossible.'));
       tx.onabort=()=>reject(tx.error || new Error('Lecture exercices interrompue.'));
     } catch(e){reject(e);}
+  });
+}
+function persistExercise(db: IDBDatabase, exercise: Exercise): Promise<void> {
+  return new Promise((resolve, reject) => {
+    try {
+      const tx = db.transaction('customExercises', 'readwrite');
+      tx.objectStore('customExercises').put(exercise);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Enregistrement de l’exercice impossible.'));
+      tx.onabort = () => reject(tx.error || new Error('Enregistrement interrompu.'));
+    } catch (error) { reject(error); }
   });
 }
 function validExercise(x: unknown): x is Exercise {
@@ -235,6 +246,53 @@ function App() {
   const [showLibrary, setShowLibrary] = useState(false);
   const [customExercises, setCustomExercises] = useState<Exercise[]>([]);
   const [libraryError, setLibraryError] = useState('');
+  const [libraryMessage, setLibraryMessage] = useState('');
+  const [editingExerciseId, setEditingExerciseId] = useState<string | null>(null);
+  const [exerciseName, setExerciseName] = useState('');
+  const [exerciseKind, setExerciseKind] = useState<ExerciseKind>('musculation');
+  const [exerciseMuscles, setExerciseMuscles] = useState('');
+  const [exerciseEquipment, setExerciseEquipment] = useState('');
+  const [exerciseBusy, setExerciseBusy] = useState(false);
+  const startExerciseEditor = (exercise?: Exercise) => {
+    setEditingExerciseId(exercise?.origin === 'custom' ? exercise.id : 'new');
+    setExerciseName(exercise?.name || '');
+    setExerciseKind(exercise?.kind || 'musculation');
+    setExerciseMuscles(exercise?.muscles.join(', ') || '');
+    setExerciseEquipment(exercise?.equipment.join(', ') || '');
+    setLibraryError(''); setLibraryMessage('');
+  };
+  const saveExercise = async () => {
+    if (!dbRef.current || storageStatus !== 'ready' || exerciseBusy) return;
+    const name = exerciseName.trim();
+    const muscles = exerciseMuscles.split(',').map(x => x.trim()).filter(Boolean);
+    const equipment = exerciseEquipment.split(',').map(x => x.trim()).filter(Boolean);
+    if (!name || name.length > 100 || !muscles.length || !equipment.length ||
+        muscles.length > 20 || equipment.length > 20 ||
+        [...muscles, ...equipment].some(x => x.length > 60)) {
+      setLibraryError('Renseigne un nom (100 caractères max), au moins un muscle et un matériel (60 caractères max par élément).'); return;
+    }
+    const id = editingExerciseId && editingExerciseId !== 'new' ? editingExerciseId : 'custom:' + crypto.randomUUID();
+    const exercise: Exercise = { id, name, kind: exerciseKind, muscles, equipment,
+      measurement: exerciseKind === 'cardio' ? 'duree-distance' : 'series-repetitions', origin: 'custom', archived: false };
+    setExerciseBusy(true); setLibraryError('');
+    try {
+      await persistExercise(dbRef.current, exercise);
+      setCustomExercises(await readCustomExercises(dbRef.current));
+      setEditingExerciseId(null); setLibraryMessage('Exercice enregistré localement.');
+    } catch (error) { setLibraryError(describeError(error)); }
+    finally { setExerciseBusy(false); }
+  };
+  const toggleExerciseArchive = async (exercise: Exercise) => {
+    if (!dbRef.current || storageStatus !== 'ready' || exerciseBusy || exercise.origin !== 'custom') return;
+    setExerciseBusy(true); setLibraryError('');
+    try {
+      await persistExercise(dbRef.current, { ...exercise, archived: !exercise.archived });
+      setCustomExercises(await readCustomExercises(dbRef.current));
+      setLibraryMessage(exercise.archived ? 'Exercice réactivé.' : 'Exercice archivé (non supprimé).');
+      if (editingExerciseId === exercise.id) setEditingExerciseId(null);
+    } catch (error) { setLibraryError(describeError(error)); }
+    finally { setExerciseBusy(false); }
+  };
   const [pwaStatus, setPwaStatus] = useState('Initialisation PWA…');
   const [updateWaiting, setUpdateWaiting] = useState<ServiceWorker | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -253,6 +311,7 @@ function App() {
       } else if (reg.installing) {
         setPwaStatus('Téléchargement de la nouvelle version en cours…');
       } else {
+        setUpdateWaiting(null);
         setPwaStatus('Vérification terminée : aucune mise à jour en attente (une activation automatique reste possible).');
       }
     } catch (error) {
@@ -299,7 +358,7 @@ function App() {
         if (!live) return;
         registration = reg;
         setPwaStatus('PWA installée · vérification des mises à jour active');
-        if (reg.waiting && navigator.serviceWorker.controller) {
+        if (reg.waiting && reg.waiting.state === 'installed' && navigator.serviceWorker.controller && reg.waiting !== navigator.serviceWorker.controller) {
           setUpdateWaiting(reg.waiting);
           setPwaStatus('Nouvelle version prête à installer');
         }
@@ -447,7 +506,7 @@ function App() {
       <aside className="sidebar" aria-label="Navigation principale">
         <div className="brand"><span className="brand-icon">LT</span><span><strong>LifeTrack</strong><small>TRAINING</small></span></div>
         <nav>{tabs.map(item => <button key={item.label} type="button" className={`side-link ${tab === item.label && !showProfile && !showLibrary ? 'active' : ''}`} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}</nav>
-        <div className="sidebar-foot">V0.1 · Lot 1-E.5<br/>PWA · Hors ligne</div>
+        <div className="sidebar-foot">V0.1 · Lot 2-A.2<br/>PWA · Hors ligne</div>
       </aside>
       <div className="main-column">
         <header className="topbar">
@@ -460,11 +519,26 @@ function App() {
           {updateWaiting && <div className="pwa-update" role="status"><span>Nouvelle version disponible.</span><button type="button" className="primary-button" onClick={() => updateWaiting.postMessage({type:'SKIP_WAITING'})}>Mettre à jour</button></div>}
           {storageError && <div className="storage-error" role="alert">{storageError}</div>}
           {storageStatus === 'ready' && <p className="muted small" style={{margin:'4px 0 10px'}}>Diagnostic L1-C.1 : {storageDetail}</p>}
-          {showLibrary && !showProfile && <section><div className="section-head"><p className="kicker">RÉFÉRENTIEL · LOT 2-A.1</p><h1>Bibliothèque d’exercices</h1><p className="muted">{STANDARD_EXERCISES.length} exercices standards · {customExercises.length} personnalisés. Consultation uniquement ; édition au lot 2-A.2.</p></div>
+          {showLibrary && !showProfile && <section>
+            <div className="section-head"><p className="kicker">RÉFÉRENTIEL · LOT 2-A.2</p><h1>Bibliothèque d’exercices</h1><p className="muted">{STANDARD_EXERCISES.length} standards · {customExercises.filter(e=>!e.archived).length} personnalisés actifs · {customExercises.filter(e=>e.archived).length} archivés.</p></div>
             {libraryError && <p className="storage-error" role="alert">{libraryError}</p>}
+            {libraryMessage && <p className="muted small" role="status">{libraryMessage}</p>}
+            <button type="button" className="primary-button" disabled={storageStatus!=='ready'||exerciseBusy} onClick={()=>startExerciseEditor()}>Créer un exercice personnalisé <span>＋</span></button>
+            {editingExerciseId && <div className="panel exercise-editor"><h2>{editingExerciseId==='new'?'Nouvel exercice':'Modifier l’exercice'}</h2>
+              <label className="field-label" htmlFor="exercise-name">Nom</label><input id="exercise-name" className="profile-input" maxLength={100} value={exerciseName} onChange={e=>setExerciseName(e.target.value)}/>
+              <label className="field-label" htmlFor="exercise-kind">Catégorie</label><select id="exercise-kind" className="profile-input" value={exerciseKind} onChange={e=>setExerciseKind(e.target.value as ExerciseKind)}><option value="musculation">Musculation</option><option value="cardio">Cardio</option></select>
+              <label className="field-label" htmlFor="exercise-muscles">Groupes musculaires (séparés par une virgule)</label><input id="exercise-muscles" className="profile-input" value={exerciseMuscles} onChange={e=>setExerciseMuscles(e.target.value)} placeholder="Biceps, Avant-bras"/>
+              <label className="field-label" htmlFor="exercise-equipment">Matériel (séparé par une virgule)</label><input id="exercise-equipment" className="profile-input" value={exerciseEquipment} onChange={e=>setExerciseEquipment(e.target.value)} placeholder="SmartWorkout"/>
+              <p className="muted small">La mesure est automatiquement adaptée à la catégorie. Les exercices standards peuvent être dupliqués, mais pas modifiés directement.</p>
+              <div className="profile-actions"><button className="primary-button save-button" disabled={exerciseBusy||storageStatus!=='ready'} onClick={()=>void saveExercise()}>{exerciseBusy?'Enregistrement…':'Enregistrer'}</button><button className="secondary-button" onClick={()=>setEditingExerciseId(null)}>Annuler</button></div>
+            </div>}
             {(['musculation','cardio'] as const).map(kind => <div className="panel" key={kind}><h2>{kind==='musculation'?'Musculation':'Cardio et endurance'}</h2>
-              {[...STANDARD_EXERCISES,...customExercises].filter(e=>e.kind===kind&&!e.archived).map(e=><div className="library-exercise" key={e.id}><strong>{e.name}</strong><p className="muted small">{e.muscles.join(' · ')} · {e.equipment.join(', ')}</p><small>{e.origin==='standard'?'Standard':'Personnalisé'} · {e.measurement==='series-repetitions'?'Séries / répétitions':'Durée / distance'}</small></div>)}
-            </div>)}<button className="secondary-button" onClick={()=>setShowLibrary(false)}>Retour à Plus</button></section>}
+              {[...STANDARD_EXERCISES,...customExercises].filter(e=>e.kind===kind&&!e.archived).map(e=><div className="library-exercise" key={e.id}><strong>{e.name}</strong><p className="muted small">{e.muscles.join(' · ')} · {e.equipment.join(', ')}</p><small>{e.origin==='standard'?'Standard':'Personnalisé'} · {e.measurement==='series-repetitions'?'Séries / répétitions':'Durée / distance'}</small>
+                <div className="library-actions">{e.origin==='standard'?<button type="button" className="text-button" onClick={()=>startExerciseEditor(e)}>Dupliquer</button>:<><button type="button" className="text-button" onClick={()=>startExerciseEditor(e)}>Modifier</button><button type="button" className="text-button" disabled={exerciseBusy} onClick={()=>void toggleExerciseArchive(e)}>Archiver</button></>}</div></div>)}
+            </div>)}
+            {customExercises.some(e=>e.archived) && <div className="panel"><h2>Exercices archivés</h2>{customExercises.filter(e=>e.archived).map(e=><div className="library-exercise" key={e.id}><strong>{e.name}</strong><div className="library-actions"><button className="text-button" disabled={exerciseBusy} onClick={()=>void toggleExerciseArchive(e)}>Réactiver</button></div></div>)}</div>}
+            <button className="secondary-button" onClick={()=>{setShowLibrary(false);setEditingExerciseId(null);}}>Retour à Plus</button>
+          </section>}
           {showProfile ? <section><div className="section-head"><div><p className="kicker">COMPTE LOCAL</p><h1>Profil</h1></div></div><div className="panel"><h2>Profil personnel</h2><p className="muted">Un seul profil local actif en V0.1. Les données sont associées à un identifiant stable, sans compte ni serveur.</p><label className="field-label" htmlFor="profile-name">Nom affiché</label><input className="profile-input" id="profile-name" type="text" maxLength={60} value={profileName} disabled={storageStatus !== 'ready' || saving} onChange={event => setProfileName(event.target.value)} /><div className="profile-actions"><button className="primary-button save-button" disabled={storageStatus !== 'ready' || saving || !profileName.trim() || profileName.trim() === profile?.name} onClick={saveProfile}>{saving ? 'Enregistrement…' : 'Enregistrer le nom'}</button><button className="secondary-button" onClick={() => setShowProfile(false)}>Retour</button></div><p className="muted small">Les informations corporelles et les objectifs sportifs seront ajoutés dans un lot ultérieur.</p></div></section> : null}
           {!showProfile && !showLibrary && tab === 'Accueil' && <section>
             <div className="section-head"><div><p className="kicker">TABLEAU DE BORD</p><h1>Bonjour 👋</h1><p className="muted">Ton entraînement, en un coup d'œil.</p></div></div>
@@ -476,7 +550,7 @@ function App() {
           {!showProfile && !showLibrary && tab === 'Séance' && <section><div className="section-head"><div><p className="kicker">ENTRAÎNEMENT</p><h1>Séance</h1><p className="muted">Prépare et retrouve tes entraînements.</p></div></div><div className="panel highlighted"><span className="pill">SÉANCE DU JOUR · EXEMPLE</span><h2>Haut du corps</h2><p className="muted">6 exercices · 18 séries · repos personnalisés</p><div className="exercise-list"><div><span>01</span> Développé debout <small>3 × 10</small></div><div><span>02</span> Tirage horizontal <small>3 × 10</small></div><div><span>03</span> Curl biceps <small>3 × 12</small></div></div><div className="disabled-action">Démarrage disponible dans un prochain lot</div></div><div className="panel"><h2>Séance libre</h2><p className="muted">Musculation, cardio ou copie d'une séance existante.</p><div className="disabled-action">Création disponible dans un prochain lot</div></div></section>}
           {!showProfile && !showLibrary && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><div className="panel"><div className="panel-heading"><h2>Semaine {week === 0 ? 'en cours' : week > 0 ? `+${week}` : week}</h2><div className="week-buttons"><button aria-label="Semaine précédente" onClick={() => setWeek(v => v - 1)}>‹</button><button aria-label="Semaine suivante" onClick={() => setWeek(v => v + 1)}>›</button></div></div><div className="calendar">{['L','M','M','J','V','S','D'].map((day, i) => <div className="calendar-day" key={`${day}-${i}`}><span>{day}</span><strong>{i + 9 + week * 7}</strong>{week === 0 && [1,3,5].includes(i) && <i className={i === 3 ? 'blue' : ''}/>}</div>)}</div><p className="muted small">Aperçu fictif du calendrier. Les dates et séances réelles seront calculées ultérieurement.</p></div><div className="panel"><h2>Programmes actifs</h2><div className="program"><div><strong>Cycle force & progression</strong><p className="muted">Exemple · 8 semaines</p></div><span className="pill">Semaine 3/8</span></div><div className="disabled-action">Éditeur disponible dans un prochain lot</div></div></section>}
           {!showProfile && !showLibrary && tab === 'Stats' && <section><div className="section-head"><div><p className="kicker">ANALYSES</p><h1>Statistiques</h1><p className="muted">Suivi de la progression et répartition musculaire.</p></div></div><div className="metrics"><div className="metric"><span>Volume</span><strong>42</strong><small>séries · exemple</small></div><div className="metric"><span>Cardio</span><strong>85</strong><small>minutes · exemple</small></div></div><div className="panel"><h2>Progression récente</h2><p className="muted small">Illustration sans données réelles</p><div className="bars" aria-label="Graphique illustratif"><span style={{height:'38%'}}/><span style={{height:'51%'}}/><span style={{height:'47%'}}/><span style={{height:'70%'}}/><span style={{height:'65%'}}/><span style={{height:'83%'}}/><span style={{height:'94%'}}/></div></div><div className="panel"><h2>Analyse musculaire</h2><p className="muted">Carte corporelle interactive, séries directes et secondaires pondérées : intégration prévue dans les lots fonctionnels.</p><div className="disabled-action">Analyse indisponible dans cette démonstration</div></div></section>}
-          {!showProfile && !showLibrary && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel"><button className="menu-item menu-button" onClick={()=>setShowLibrary(true)}><div><strong>Bibliothèque d’exercices</strong><p className="muted">{STANDARD_EXERCISES.length} exercices préchargés · Consultation</p></div><span>→</span></button>{[['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>Sauvegarde et restauration</h2><p className="muted small">Sauvegarde JSON locale du profil, du thème et des exercices personnalisés. Aucun transfert vers un serveur. Enregistre une copie du fichier dans Fichiers ou sur un autre support.</p><div className="profile-actions"><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={exportBackup}>Exporter JSON</button><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={() => backupInputRef.current?.click()}>Restaurer un JSON</button><input ref={backupInputRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={event => { void importBackup(event.target.files?.[0]); }} aria-label="Choisir un fichier de sauvegarde JSON" /></div><p className="muted small" role="status">{backupBusy ? 'Traitement en cours…' : backupMessage || 'Avant toute restauration, exporte une sauvegarde de l’état actuel.'}</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 2-A.1</p><p className="muted small">{pwaStatus}</p><button type="button" className="secondary-button" disabled={checkingUpdate} onClick={() => void checkUpdateManually()}>{checkingUpdate ? "Vérification…" : "Rechercher une mise à jour"}</button><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
+          {!showProfile && !showLibrary && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel"><button className="menu-item menu-button" onClick={()=>setShowLibrary(true)}><div><strong>Bibliothèque d’exercices</strong><p className="muted">{STANDARD_EXERCISES.length} exercices préchargés · Création et édition</p></div><span>→</span></button>{[['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>Sauvegarde et restauration</h2><p className="muted small">Sauvegarde JSON locale du profil, du thème et des exercices personnalisés. Aucun transfert vers un serveur. Enregistre une copie du fichier dans Fichiers ou sur un autre support.</p><div className="profile-actions"><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={exportBackup}>Exporter JSON</button><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={() => backupInputRef.current?.click()}>Restaurer un JSON</button><input ref={backupInputRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={event => { void importBackup(event.target.files?.[0]); }} aria-label="Choisir un fichier de sauvegarde JSON" /></div><p className="muted small" role="status">{backupBusy ? 'Traitement en cours…' : backupMessage || 'Avant toute restauration, exporte une sauvegarde de l’état actuel.'}</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 2-A.2</p><p className="muted small">{pwaStatus}</p><button type="button" className="secondary-button" disabled={checkingUpdate} onClick={() => void checkUpdateManually()}>{checkingUpdate ? "Vérification…" : "Rechercher une mise à jour"}</button><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
         </main>
         <nav className="bottom-nav" aria-label="Navigation mobile">{tabs.map(item => <button type="button" key={item.label} className={tab === item.label && !showProfile && !showLibrary ? 'active' : ''} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span><small>{item.label}</small></button>)}</nav>
       </div>

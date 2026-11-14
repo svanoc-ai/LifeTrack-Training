@@ -29,3 +29,6 @@ button:disabled{opacity:.55;cursor:not-allowed}
 .library-exercise strong{font-size:14px}
 .library-exercise p{margin:5px 0}
 .library-exercise small{font-size:11px;color:var(--blue)}
+
+/* Lot 2-A.2 — Éditeur de bibliothèque */
+.exercise-editor{margin-top:18px}.exercise-editor .field-label{margin-top:15px}.library-actions{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px}.library-actions button{padding:7px 0}.library-exercise{padding:13px 0;border-bottom:1px solid var(--line)}.library-exercise:last-child{border-bottom:0}.library-exercise>small{color:var(--muted)}
