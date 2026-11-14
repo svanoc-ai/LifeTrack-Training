@@ -9,3 +9,6 @@
 .save-button{width:auto;margin:0;display:block;padding:13px 16px}
 .profile-actions .secondary-button{margin:0}
 button:disabled{opacity:.55;cursor:not-allowed}
+/* Lot 1-D — mise à jour PWA */
+.pwa-update {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;margin:8px 0 14px;border:1px solid #B9F34C;border-radius:12px;background:rgba(185,243,76,.09);flex-wrap:wrap}
+.pwa-update .primary-button {min-height:36px;padding:8px 12px}
