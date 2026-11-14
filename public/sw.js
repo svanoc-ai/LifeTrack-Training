@@ -4,7 +4,7 @@ const VERSION = '0.1.0-l1d';
 const PREFIX = 'lifetrack-training-pwa-';
 const CACHE = PREFIX + VERSION;
 const ROOT = new URL('./', self.location.href).pathname;
-const CORE = [ROOT, ROOT + 'manifest.webmanifest', ROOT + 'icons/icon-192.png', ROOT + 'icons/icon-512.png', ROOT + 'icons/icon-180.png'];
+const CORE = [ROOT, ROOT + 'manifest.webmanifest', ROOT + 'Icons/icon-192.png', ROOT + 'Icons/icon-512.png', ROOT + 'Icons/icon-180.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
