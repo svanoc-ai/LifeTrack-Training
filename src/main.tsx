@@ -116,6 +116,58 @@ async function loadLocalData(): Promise<{ db: IDBDatabase; profile: LocalProfile
     return { db, profile, settings };
   } catch (error) { db.close(); throw error; }
 }
+// Lot 1-E.2 : sauvegarde portable et restauration transactionnelle.
+const BACKUP_FORMAT = 'lifetrack-training-backup';
+const BACKUP_VERSION = 1;
+type BackupDocument = {
+  format: typeof BACKUP_FORMAT;
+  version: number;
+  exportedAt: string;
+  dataSchemaVersion: number;
+  profile: LocalProfile;
+  settings: LocalSettings;
+};
+function validDate(value: unknown): value is string {
+  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+function validateBackup(value: unknown): BackupDocument {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Fichier JSON invalide.');
+  const raw = value as Record<string, unknown>;
+  if (raw.format !== BACKUP_FORMAT || raw.version !== BACKUP_VERSION || raw.dataSchemaVersion !== DATA_SCHEMA_VERSION) {
+    throw new Error('Format ou version de sauvegarde incompatible. Aucune donnée modifiée.');
+  }
+  if (!validDate(raw.exportedAt)) throw new Error('Date d’export invalide.');
+  const p = raw.profile as Record<string, unknown> | null;
+  const pref = raw.settings as Record<string, unknown> | null;
+  if (!p || typeof p !== 'object' || Array.isArray(p) ||
+      typeof p.id !== 'string' || p.id.length < 8 || p.id.length > 128 ||
+      typeof p.name !== 'string' || !p.name.trim() || p.name.length > 60 ||
+      !validDate(p.createdAt) || !validDate(p.updatedAt)) {
+    throw new Error('Profil de sauvegarde invalide.');
+  }
+  if (!pref || typeof pref !== 'object' || Array.isArray(pref) ||
+      pref.id !== SETTINGS_KEY || pref.profileId !== p.id ||
+      !['dark', 'light', 'system'].includes(String(pref.theme)) || !validDate(pref.updatedAt)) {
+    throw new Error('Préférences de sauvegarde invalides.');
+  }
+  return raw as unknown as BackupDocument;
+}
+function restoreBackup(db: IDBDatabase, backup: BackupDocument): Promise<void> {
+  return new Promise((resolve, reject) => {
+    try {
+      // Une seule transaction : aucun état partiellement restauré en cas d'échec.
+      const tx = db.transaction(['profiles', 'settings'], 'readwrite');
+      const profiles = tx.objectStore('profiles');
+      const settings = tx.objectStore('settings');
+      profiles.clear();
+      profiles.put(backup.profile);
+      settings.put(backup.settings);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Restauration impossible.'));
+      tx.onabort = () => reject(tx.error || new Error('Restauration annulée.'));
+    } catch (error) { reject(error); }
+  });
+}
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : 'Une erreur de stockage est survenue.';
 }
@@ -210,6 +262,62 @@ function App() {
     } catch (error) { setStorageError('Thème non enregistré : ' + describeError(error)); }
     finally { setSaving(false); }
   };
+  const backupInputRef = React.useRef<HTMLInputElement | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState('');
+  const exportBackup = async () => {
+    if (!dbRef.current || storageStatus !== 'ready' || backupBusy || saving) return;
+    setBackupBusy(true); setBackupMessage('');
+    try {
+      const profiles = await readProfiles(dbRef.current);
+      const storedSettings = await readRecord<LocalSettings>(dbRef.current, 'settings', SETTINGS_KEY);
+      if (profiles.length !== 1 || !storedSettings || storedSettings.profileId !== profiles[0].id) {
+        throw new Error('Données locales incohérentes : export interrompu.');
+      }
+      const backup: BackupDocument = {
+        format: BACKUP_FORMAT, version: BACKUP_VERSION,
+        exportedAt: new Date().toISOString(), dataSchemaVersion: DATA_SCHEMA_VERSION,
+        profile: profiles[0], settings: storedSettings,
+      };
+      validateBackup(backup);
+      const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `lifetrack-training-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+      setBackupMessage('Export préparé. Vérifie que le fichier JSON a bien été enregistré dans Fichiers/Téléchargements.');
+    } catch (error) { setBackupMessage('Export impossible : ' + describeError(error)); }
+    finally { setBackupBusy(false); }
+  };
+  const importBackup = async (file: File | undefined) => {
+    if (!file || !dbRef.current || storageStatus !== 'ready' || backupBusy || saving) return;
+    setBackupBusy(true); setBackupMessage('');
+    try {
+      if (file.size > 1024 * 1024) throw new Error('Fichier trop volumineux (maximum 1 Mo).');
+      const backup = validateBackup(JSON.parse(await file.text()) as unknown);
+      if (!window.confirm(`Restaurer le profil « ${backup.profile.name} » et son thème ?\n\nCette opération REMPLACERA le profil et les préférences de cet appareil. Elle est irréversible sans sauvegarde préalable.`)) {
+        setBackupMessage('Restauration annulée : aucune donnée modifiée.');
+        return;
+      }
+      await restoreBackup(dbRef.current, backup);
+      const profiles = await readProfiles(dbRef.current);
+      const settings = await readRecord<LocalSettings>(dbRef.current, 'settings', SETTINGS_KEY);
+      if (profiles.length !== 1 || profiles[0].id !== backup.profile.id ||
+          profiles[0].name !== backup.profile.name || settings?.theme !== backup.settings.theme ||
+          settings?.profileId !== backup.profile.id) {
+        throw new Error('Contrôle de relecture après restauration non conforme.');
+      }
+      setProfile(profiles[0]);
+      setProfileName(profiles[0].name);
+      setTheme(settings.theme);
+      setStorageDetail('Restauration contrôlée · ' + new Date().toLocaleTimeString('fr-FR'));
+      setBackupMessage('Restauration réussie : profil et thème relus depuis IndexedDB.');
+    } catch (error) { setBackupMessage('Restauration refusée : ' + describeError(error)); }
+    finally { setBackupBusy(false); if (backupInputRef.current) backupInputRef.current.value = ''; }
+  };
   const [showProfile, setShowProfile] = useState(false);
   const [week, setWeek] = useState(0);
   const effectiveTheme = theme === 'system' ? 'system' : theme;
@@ -245,7 +353,7 @@ function App() {
           {!showProfile && tab === 'Séance' && <section><div className="section-head"><div><p className="kicker">ENTRAÎNEMENT</p><h1>Séance</h1><p className="muted">Prépare et retrouve tes entraînements.</p></div></div><div className="panel highlighted"><span className="pill">SÉANCE DU JOUR · EXEMPLE</span><h2>Haut du corps</h2><p className="muted">6 exercices · 18 séries · repos personnalisés</p><div className="exercise-list"><div><span>01</span> Développé debout <small>3 × 10</small></div><div><span>02</span> Tirage horizontal <small>3 × 10</small></div><div><span>03</span> Curl biceps <small>3 × 12</small></div></div><div className="disabled-action">Démarrage disponible dans un prochain lot</div></div><div className="panel"><h2>Séance libre</h2><p className="muted">Musculation, cardio ou copie d'une séance existante.</p><div className="disabled-action">Création disponible dans un prochain lot</div></div></section>}
           {!showProfile && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><div className="panel"><div className="panel-heading"><h2>Semaine {week === 0 ? 'en cours' : week > 0 ? `+${week}` : week}</h2><div className="week-buttons"><button aria-label="Semaine précédente" onClick={() => setWeek(v => v - 1)}>‹</button><button aria-label="Semaine suivante" onClick={() => setWeek(v => v + 1)}>›</button></div></div><div className="calendar">{['L','M','M','J','V','S','D'].map((day, i) => <div className="calendar-day" key={`${day}-${i}`}><span>{day}</span><strong>{i + 9 + week * 7}</strong>{week === 0 && [1,3,5].includes(i) && <i className={i === 3 ? 'blue' : ''}/>}</div>)}</div><p className="muted small">Aperçu fictif du calendrier. Les dates et séances réelles seront calculées ultérieurement.</p></div><div className="panel"><h2>Programmes actifs</h2><div className="program"><div><strong>Cycle force & progression</strong><p className="muted">Exemple · 8 semaines</p></div><span className="pill">Semaine 3/8</span></div><div className="disabled-action">Éditeur disponible dans un prochain lot</div></div></section>}
           {!showProfile && tab === 'Stats' && <section><div className="section-head"><div><p className="kicker">ANALYSES</p><h1>Statistiques</h1><p className="muted">Suivi de la progression et répartition musculaire.</p></div></div><div className="metrics"><div className="metric"><span>Volume</span><strong>42</strong><small>séries · exemple</small></div><div className="metric"><span>Cardio</span><strong>85</strong><small>minutes · exemple</small></div></div><div className="panel"><h2>Progression récente</h2><p className="muted small">Illustration sans données réelles</p><div className="bars" aria-label="Graphique illustratif"><span style={{height:'38%'}}/><span style={{height:'51%'}}/><span style={{height:'47%'}}/><span style={{height:'70%'}}/><span style={{height:'65%'}}/><span style={{height:'83%'}}/><span style={{height:'94%'}}/></div></div><div className="panel"><h2>Analyse musculaire</h2><p className="muted">Carte corporelle interactive, séries directes et secondaires pondérées : intégration prévue dans les lots fonctionnels.</p><div className="disabled-action">Analyse indisponible dans cette démonstration</div></div></section>}
-          {!showProfile && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel">{[['Bibliothèque d’exercices','Exercices et variantes'],['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 1-E.1</p><p className="muted small">{pwaStatus}</p><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
+          {!showProfile && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel">{[['Bibliothèque d’exercices','Exercices et variantes'],['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>Sauvegarde et restauration</h2><p className="muted small">Sauvegarde JSON locale du profil et du thème. Aucun transfert vers un serveur. Enregistre une copie du fichier dans Fichiers ou sur un autre support.</p><div className="profile-actions"><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={exportBackup}>Exporter JSON</button><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={() => backupInputRef.current?.click()}>Restaurer un JSON</button><input ref={backupInputRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={event => { void importBackup(event.target.files?.[0]); }} aria-label="Choisir un fichier de sauvegarde JSON" /></div><p className="muted small" role="status">{backupBusy ? 'Traitement en cours…' : backupMessage || 'Avant toute restauration, exporte une sauvegarde de l’état actuel.'}</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 1-E.2</p><p className="muted small">{pwaStatus}</p><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
         </main>
         <nav className="bottom-nav" aria-label="Navigation mobile">{tabs.map(item => <button type="button" key={item.label} className={tab === item.label && !showProfile ? 'active' : ''} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span><small>{item.label}</small></button>)}</nav>
       </div>
