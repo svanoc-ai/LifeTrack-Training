@@ -324,12 +324,12 @@ function validateBackup(value: unknown): BackupDocument {
       !['dark', 'light', 'system'].includes(String(pref.theme)) || !validDate(pref.updatedAt)) {
     throw new Error('Préférences de sauvegarde invalides.');
   }
-  if ((raw.version >= 2) && (raw.dataSchemaVersion !== raw.version || !Array.isArray(raw.customExercises) ||
+  if ((Number(raw.version) >= 2) && (raw.dataSchemaVersion !== raw.version || !Array.isArray(raw.customExercises) ||
       raw.customExercises.length > 500 || !raw.customExercises.every(validExercise) ||
       new Set((raw.customExercises as Exercise[]).map(e=>e.id)).size !== raw.customExercises.length)) {
     throw new Error('Bibliothèque personnalisée de sauvegarde invalide.');
   }
-  if (raw.version >= 3 && !validPlanning(raw.workoutTemplates,raw.trainingPrograms,raw.plannedWorkouts)) {
+  if (Number(raw.version) >= 3 && !validPlanning(raw.workoutTemplates,raw.trainingPrograms,raw.plannedWorkouts)) {
     throw new Error('Données de programmes de sauvegarde invalides.');
   }
   if (raw.version === 4 && (!Array.isArray(raw.executions) || raw.executions.length > 3000 || !raw.executions.every(validExecution))) throw new Error('Historique des séances invalide.');
