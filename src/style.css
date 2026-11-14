@@ -23,3 +23,9 @@ button:disabled{opacity:.55;cursor:not-allowed}
   }
 }
 
+
+/* Lot 2-A.1 — Catalogue */
+.library-exercise{padding:13px 0;border-top:1px solid var(--line)}
+.library-exercise strong{font-size:14px}
+.library-exercise p{margin:5px 0}
+.library-exercise small{font-size:11px;color:var(--blue)}

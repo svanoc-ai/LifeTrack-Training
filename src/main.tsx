@@ -12,14 +12,59 @@ const tabs: { label: Tab; icon: string }[] = [
 ];
 
 
+// Lot 2-A.1 — Référentiel standard immuable ; personnalisations futures en IndexedDB.
+type ExerciseKind = 'musculation' | 'cardio';
+type Exercise = { id: string; name: string; kind: ExerciseKind; muscles: string[]; equipment: string[]; measurement: 'series-repetitions' | 'duree-distance'; origin: 'standard' | 'custom'; archived: boolean; };
+const STANDARD_EXERCISES: Exercise[] = [
+  ['curl-biceps','Curl biceps','musculation',['Biceps'],['SmartWorkout']],
+  ['developpe-debout','Développé debout','musculation',['Pectoraux','Triceps','Épaules'],['SmartPress']],
+  ['tirage-horizontal','Tirage horizontal','musculation',['Dos','Biceps'],['SmartPress']],
+  ['rowing','Rowing','musculation',['Dos','Biceps'],['SmartWorkout']],
+  ['pull-over','Pull-over','musculation',['Dos','Pectoraux'],['SmartWorkout']],
+  ['elevations-laterales','Élévations latérales','musculation',['Épaules'],['SmartWorkout']],
+  ['extensions-triceps','Extensions triceps','musculation',['Triceps'],['SmartWorkout']],
+  ['ecartes-pectoraux','Écartés pectoraux','musculation',['Pectoraux'],['SmartWorkout']],
+  ['souleve-de-terre','Soulevé de terre','musculation',['Dos','Ischio-jambiers','Fessiers'],['SmartWorkout']],
+  ['hip-thrust','Hip thrust','musculation',['Fessiers'],['Bandes élastiques']],
+  ['abduction-hanche','Abduction de hanche','musculation',['Fessiers'],['Bandes élastiques']],
+  ['pont-fessier','Pont fessier','musculation',['Fessiers'],['Poids du corps']],
+  ['gainage','Gainage','musculation',['Abdominaux'],['Poids du corps']],
+  ['bird-dog','Bird-dog','musculation',['Abdominaux','Dos'],['Poids du corps']],
+  ['marche-tapis','Marche sur tapis','cardio',['Cardio'],['Tapis Sole F63']],
+  ['course-tapis','Course sur tapis','cardio',['Cardio'],['Tapis Sole F63']],
+  ['velo-appartement','Vélo d’appartement','cardio',['Cardio'],['Vélo Merach S36L']],
+  ['marche-exterieure','Marche extérieure','cardio',['Cardio'],['Sans matériel']],
+  ['randonnee','Randonnée','cardio',['Cardio'],['Sans matériel']],
+  ['course-exterieure','Course extérieure','cardio',['Cardio'],['Sans matériel']],
+].map(([id,name,kind,muscles,equipment]) => ({ id: 'std:'+id, name: name as string, kind: kind as ExerciseKind, muscles: muscles as string[], equipment: equipment as string[], measurement: kind === 'cardio' ? 'duree-distance' : 'series-repetitions', origin: 'standard', archived: false }));
+function readCustomExercises(db: IDBDatabase): Promise<Exercise[]> {
+  return new Promise((resolve,reject) => {
+    try { const tx=db.transaction('customExercises','readonly'); let result: Exercise[]=[];
+      tx.objectStore('customExercises').getAll().onsuccess=e=>{result=(e.target as IDBRequest<Exercise[]>).result;};
+      tx.oncomplete=()=>resolve(result); tx.onerror=()=>reject(tx.error || new Error('Lecture exercices impossible.'));
+      tx.onabort=()=>reject(tx.error || new Error('Lecture exercices interrompue.'));
+    } catch(e){reject(e);}
+  });
+}
+function validExercise(x: unknown): x is Exercise {
+  if(!x || typeof x!=='object' || Array.isArray(x)) return false;
+  const e=x as Partial<Exercise>;
+  return typeof e.id==='string' && e.id.startsWith('custom:') && e.id.length<=128 &&
+    typeof e.name==='string' && !!e.name.trim() && e.name.length<=100 &&
+    (e.kind==='musculation'||e.kind==='cardio') && e.origin==='custom' && typeof e.archived==='boolean' &&
+    (e.measurement==='series-repetitions'||e.measurement==='duree-distance') &&
+    Array.isArray(e.muscles) && e.muscles.length<=20 && e.muscles.every(v=>typeof v==='string'&&v.length<=60) &&
+    Array.isArray(e.equipment) && e.equipment.length<=20 && e.equipment.every(v=>typeof v==='string'&&v.length<=60);
+}
+
 // Lot 1-C : profil unique actif, stockage local IndexedDB versionné.
 // Le profil est créé uniquement si la base ne contient encore aucun profil.
 type Theme = 'dark' | 'light' | 'system';
 type LocalProfile = { id: string; name: string; createdAt: string; updatedAt: string };
 type LocalSettings = { id: string; profileId: string; theme: Theme; updatedAt: string };
 const DB_NAME = 'lifetrack-training';
-const DB_VERSION = 2;
-const DATA_SCHEMA_VERSION = 1; // Format logique des données, indépendant de la version IndexedDB.
+const DB_VERSION = 3;
+const DATA_SCHEMA_VERSION = 2; // Format logique des données, indépendant de la version IndexedDB.
 type SchemaMetadata = { id: 'schema'; version: number; updatedAt: string };
 const SETTINGS_KEY = 'preferences';
 function openDatabase(): Promise<IDBDatabase> {
@@ -30,6 +75,7 @@ function openDatabase(): Promise<IDBDatabase> {
       const db = request.result;
       if (!db.objectStoreNames.contains('profiles')) db.createObjectStore('profiles', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('customExercises')) db.createObjectStore('customExercises', { keyPath: 'id' });
       // Migration additive : aucun effacement des profils ni des préférences existants.
       const meta = db.objectStoreNames.contains('metadata')
         ? request.transaction!.objectStore('metadata')
@@ -118,7 +164,7 @@ async function loadLocalData(): Promise<{ db: IDBDatabase; profile: LocalProfile
 }
 // Lot 1-E.2 : sauvegarde portable et restauration transactionnelle.
 const BACKUP_FORMAT = 'lifetrack-training-backup';
-const BACKUP_VERSION = 1;
+const BACKUP_VERSION = 2;
 type BackupDocument = {
   format: typeof BACKUP_FORMAT;
   version: number;
@@ -126,6 +172,7 @@ type BackupDocument = {
   dataSchemaVersion: number;
   profile: LocalProfile;
   settings: LocalSettings;
+  customExercises?: Exercise[];
 };
 function validDate(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
@@ -133,7 +180,7 @@ function validDate(value: unknown): value is string {
 function validateBackup(value: unknown): BackupDocument {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Fichier JSON invalide.');
   const raw = value as Record<string, unknown>;
-  if (raw.format !== BACKUP_FORMAT || raw.version !== BACKUP_VERSION || raw.dataSchemaVersion !== DATA_SCHEMA_VERSION) {
+  if (raw.format !== BACKUP_FORMAT || ![1, BACKUP_VERSION].includes(Number(raw.version)) || ![1, DATA_SCHEMA_VERSION].includes(Number(raw.dataSchemaVersion))) {
     throw new Error('Format ou version de sauvegarde incompatible. Aucune donnée modifiée.');
   }
   if (!validDate(raw.exportedAt)) throw new Error('Date d’export invalide.');
@@ -150,18 +197,29 @@ function validateBackup(value: unknown): BackupDocument {
       !['dark', 'light', 'system'].includes(String(pref.theme)) || !validDate(pref.updatedAt)) {
     throw new Error('Préférences de sauvegarde invalides.');
   }
+  if (raw.version === 2 && (raw.dataSchemaVersion !== DATA_SCHEMA_VERSION || !Array.isArray(raw.customExercises) ||
+      raw.customExercises.length > 500 || !raw.customExercises.every(validExercise) ||
+      new Set((raw.customExercises as Exercise[]).map(e=>e.id)).size !== raw.customExercises.length)) {
+    throw new Error('Bibliothèque personnalisée de sauvegarde invalide.');
+  }
+  if (raw.version === 1 && raw.dataSchemaVersion !== 1) throw new Error('Ancien schéma JSON incompatible.');
   return raw as unknown as BackupDocument;
 }
 function restoreBackup(db: IDBDatabase, backup: BackupDocument): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       // Une seule transaction : aucun état partiellement restauré en cas d'échec.
-      const tx = db.transaction(['profiles', 'settings'], 'readwrite');
+      const tx = db.transaction(['profiles', 'settings', 'customExercises'], 'readwrite');
       const profiles = tx.objectStore('profiles');
       const settings = tx.objectStore('settings');
       profiles.clear();
       profiles.put(backup.profile);
       settings.put(backup.settings);
+      // Ancien JSON : ne jamais effacer les exercices créés depuis son export.
+      if (backup.version === 2) {
+        const exercises = tx.objectStore('customExercises'); exercises.clear();
+        for (const exercise of backup.customExercises || []) exercises.put(exercise);
+      }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Restauration impossible.'));
       tx.onabort = () => reject(tx.error || new Error('Restauration annulée.'));
@@ -174,6 +232,9 @@ function describeError(error: unknown): string {
 
 function App() {
   const [tab, setTab] = useState<Tab>('Accueil');
+  const [showLibrary, setShowLibrary] = useState(false);
+  const [customExercises, setCustomExercises] = useState<Exercise[]>([]);
+  const [libraryError, setLibraryError] = useState('');
   const [pwaStatus, setPwaStatus] = useState('Initialisation PWA…');
   const [updateWaiting, setUpdateWaiting] = useState<ServiceWorker | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -205,13 +266,14 @@ function App() {
     let registration: ServiceWorkerRegistration | null = null;
     let installingWorker: ServiceWorker | null = null;
     const onControllerChange = () => {
+      setUpdateWaiting(null);
       if (!live || refreshing) return;
       refreshing = true;
       window.location.reload();
     };
     const onWorkerStateChange = () => {
       if (!live || installingWorker?.state !== 'installed') return;
-      if (navigator.serviceWorker.controller && installingWorker) {
+      if (navigator.serviceWorker.controller && installingWorker && installingWorker !== navigator.serviceWorker.controller) {
         setUpdateWaiting(installingWorker);
         setPwaStatus('Nouvelle version prête à installer');
       }
@@ -280,6 +342,8 @@ function App() {
       setProfile(storedProfile);
       setProfileName(storedProfile.name);
       setTheme(settings.theme);
+      readCustomExercises(db).then(items => { if (!cancelled) setCustomExercises(items); })
+        .catch(error => { if (!cancelled) setLibraryError(describeError(error)); });
       setStorageStatus('ready');
       setStorageDetail('Schéma ' + DATA_SCHEMA_VERSION + ' vérifié · profil ' + storedProfile.id.slice(0, 8));
     }).catch(error => {
@@ -330,7 +394,7 @@ function App() {
       const backup: BackupDocument = {
         format: BACKUP_FORMAT, version: BACKUP_VERSION,
         exportedAt: new Date().toISOString(), dataSchemaVersion: DATA_SCHEMA_VERSION,
-        profile: profiles[0], settings: storedSettings,
+        profile: profiles[0], settings: storedSettings, customExercises: await readCustomExercises(dbRef.current),
       };
       validateBackup(backup);
       const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
@@ -366,6 +430,7 @@ function App() {
       setProfile(profiles[0]);
       setProfileName(profiles[0].name);
       setTheme(settings.theme);
+      setCustomExercises(await readCustomExercises(dbRef.current));
       setStorageDetail('Restauration contrôlée · ' + new Date().toLocaleTimeString('fr-FR'));
       setBackupMessage('Restauration réussie : profil et thème relus depuis IndexedDB.');
     } catch (error) { setBackupMessage('Restauration refusée : ' + describeError(error)); }
@@ -375,13 +440,13 @@ function App() {
   const [week, setWeek] = useState(0);
   const effectiveTheme = theme === 'system' ? 'system' : theme;
 
-  const navigate = (next: Tab) => { setTab(next); setShowProfile(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  const navigate = (next: Tab) => { setTab(next); setShowProfile(false); setShowLibrary(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   return (
     <div className={`shell theme-${effectiveTheme}`}>
       <aside className="sidebar" aria-label="Navigation principale">
         <div className="brand"><span className="brand-icon">LT</span><span><strong>LifeTrack</strong><small>TRAINING</small></span></div>
-        <nav>{tabs.map(item => <button key={item.label} type="button" className={`side-link ${tab === item.label && !showProfile ? 'active' : ''}`} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}</nav>
+        <nav>{tabs.map(item => <button key={item.label} type="button" className={`side-link ${tab === item.label && !showProfile && !showLibrary ? 'active' : ''}`} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}</nav>
         <div className="sidebar-foot">V0.1 · Lot 1-E.5<br/>PWA · Hors ligne</div>
       </aside>
       <div className="main-column">
@@ -395,20 +460,25 @@ function App() {
           {updateWaiting && <div className="pwa-update" role="status"><span>Nouvelle version disponible.</span><button type="button" className="primary-button" onClick={() => updateWaiting.postMessage({type:'SKIP_WAITING'})}>Mettre à jour</button></div>}
           {storageError && <div className="storage-error" role="alert">{storageError}</div>}
           {storageStatus === 'ready' && <p className="muted small" style={{margin:'4px 0 10px'}}>Diagnostic L1-C.1 : {storageDetail}</p>}
+          {showLibrary && !showProfile && <section><div className="section-head"><p className="kicker">RÉFÉRENTIEL · LOT 2-A.1</p><h1>Bibliothèque d’exercices</h1><p className="muted">{STANDARD_EXERCISES.length} exercices standards · {customExercises.length} personnalisés. Consultation uniquement ; édition au lot 2-A.2.</p></div>
+            {libraryError && <p className="storage-error" role="alert">{libraryError}</p>}
+            {(['musculation','cardio'] as const).map(kind => <div className="panel" key={kind}><h2>{kind==='musculation'?'Musculation':'Cardio et endurance'}</h2>
+              {[...STANDARD_EXERCISES,...customExercises].filter(e=>e.kind===kind&&!e.archived).map(e=><div className="library-exercise" key={e.id}><strong>{e.name}</strong><p className="muted small">{e.muscles.join(' · ')} · {e.equipment.join(', ')}</p><small>{e.origin==='standard'?'Standard':'Personnalisé'} · {e.measurement==='series-repetitions'?'Séries / répétitions':'Durée / distance'}</small></div>)}
+            </div>)}<button className="secondary-button" onClick={()=>setShowLibrary(false)}>Retour à Plus</button></section>}
           {showProfile ? <section><div className="section-head"><div><p className="kicker">COMPTE LOCAL</p><h1>Profil</h1></div></div><div className="panel"><h2>Profil personnel</h2><p className="muted">Un seul profil local actif en V0.1. Les données sont associées à un identifiant stable, sans compte ni serveur.</p><label className="field-label" htmlFor="profile-name">Nom affiché</label><input className="profile-input" id="profile-name" type="text" maxLength={60} value={profileName} disabled={storageStatus !== 'ready' || saving} onChange={event => setProfileName(event.target.value)} /><div className="profile-actions"><button className="primary-button save-button" disabled={storageStatus !== 'ready' || saving || !profileName.trim() || profileName.trim() === profile?.name} onClick={saveProfile}>{saving ? 'Enregistrement…' : 'Enregistrer le nom'}</button><button className="secondary-button" onClick={() => setShowProfile(false)}>Retour</button></div><p className="muted small">Les informations corporelles et les objectifs sportifs seront ajoutés dans un lot ultérieur.</p></div></section> : null}
-          {!showProfile && tab === 'Accueil' && <section>
+          {!showProfile && !showLibrary && tab === 'Accueil' && <section>
             <div className="section-head"><div><p className="kicker">TABLEAU DE BORD</p><h1>Bonjour 👋</h1><p className="muted">Ton entraînement, en un coup d'œil.</p></div></div>
             <div className="hero-card"><div className="hero-top"><span className="pill">PROCHAINE SÉANCE · EXEMPLE</span><span className="hero-time">~ 55 min</span></div><p className="hero-label">Aujourd'hui</p><h2>Haut du corps</h2><p>6 exercices · Pectoraux, dos, épaules</p><button className="primary-button" onClick={() => navigate('Séance')}>Voir la séance <span>→</span></button></div>
             <div className="section-title"><h2>Cette semaine</h2><span className="muted">Données fictives</span></div>
             <div className="metrics"><div className="metric"><span>Séances</span><strong>3<span>/4</span></strong><small>prévues</small></div><div className="metric"><span>Durée</span><strong>2h 35</strong><small>entraînement</small></div><div className="metric"><span>Séries</span><strong>42</strong><small>validées</small></div></div>
             <div className="panel"><div className="panel-heading"><h2>Programme</h2><button className="text-button" onClick={() => navigate('Programmes')}>Calendrier →</button></div><div className="timeline"><span className="timeline-dot"/><div><strong>Demain · Cardio</strong><p>Vélo · 40 min · séance planifiée</p></div></div><div className="timeline"><span className="timeline-dot lime"/><div><strong>Samedi · Full body</strong><p>Musculation · 60 min</p></div></div></div>
           </section>}
-          {!showProfile && tab === 'Séance' && <section><div className="section-head"><div><p className="kicker">ENTRAÎNEMENT</p><h1>Séance</h1><p className="muted">Prépare et retrouve tes entraînements.</p></div></div><div className="panel highlighted"><span className="pill">SÉANCE DU JOUR · EXEMPLE</span><h2>Haut du corps</h2><p className="muted">6 exercices · 18 séries · repos personnalisés</p><div className="exercise-list"><div><span>01</span> Développé debout <small>3 × 10</small></div><div><span>02</span> Tirage horizontal <small>3 × 10</small></div><div><span>03</span> Curl biceps <small>3 × 12</small></div></div><div className="disabled-action">Démarrage disponible dans un prochain lot</div></div><div className="panel"><h2>Séance libre</h2><p className="muted">Musculation, cardio ou copie d'une séance existante.</p><div className="disabled-action">Création disponible dans un prochain lot</div></div></section>}
-          {!showProfile && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><div className="panel"><div className="panel-heading"><h2>Semaine {week === 0 ? 'en cours' : week > 0 ? `+${week}` : week}</h2><div className="week-buttons"><button aria-label="Semaine précédente" onClick={() => setWeek(v => v - 1)}>‹</button><button aria-label="Semaine suivante" onClick={() => setWeek(v => v + 1)}>›</button></div></div><div className="calendar">{['L','M','M','J','V','S','D'].map((day, i) => <div className="calendar-day" key={`${day}-${i}`}><span>{day}</span><strong>{i + 9 + week * 7}</strong>{week === 0 && [1,3,5].includes(i) && <i className={i === 3 ? 'blue' : ''}/>}</div>)}</div><p className="muted small">Aperçu fictif du calendrier. Les dates et séances réelles seront calculées ultérieurement.</p></div><div className="panel"><h2>Programmes actifs</h2><div className="program"><div><strong>Cycle force & progression</strong><p className="muted">Exemple · 8 semaines</p></div><span className="pill">Semaine 3/8</span></div><div className="disabled-action">Éditeur disponible dans un prochain lot</div></div></section>}
-          {!showProfile && tab === 'Stats' && <section><div className="section-head"><div><p className="kicker">ANALYSES</p><h1>Statistiques</h1><p className="muted">Suivi de la progression et répartition musculaire.</p></div></div><div className="metrics"><div className="metric"><span>Volume</span><strong>42</strong><small>séries · exemple</small></div><div className="metric"><span>Cardio</span><strong>85</strong><small>minutes · exemple</small></div></div><div className="panel"><h2>Progression récente</h2><p className="muted small">Illustration sans données réelles</p><div className="bars" aria-label="Graphique illustratif"><span style={{height:'38%'}}/><span style={{height:'51%'}}/><span style={{height:'47%'}}/><span style={{height:'70%'}}/><span style={{height:'65%'}}/><span style={{height:'83%'}}/><span style={{height:'94%'}}/></div></div><div className="panel"><h2>Analyse musculaire</h2><p className="muted">Carte corporelle interactive, séries directes et secondaires pondérées : intégration prévue dans les lots fonctionnels.</p><div className="disabled-action">Analyse indisponible dans cette démonstration</div></div></section>}
-          {!showProfile && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel">{[['Bibliothèque d’exercices','Exercices et variantes'],['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>Sauvegarde et restauration</h2><p className="muted small">Sauvegarde JSON locale du profil et du thème. Aucun transfert vers un serveur. Enregistre une copie du fichier dans Fichiers ou sur un autre support.</p><div className="profile-actions"><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={exportBackup}>Exporter JSON</button><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={() => backupInputRef.current?.click()}>Restaurer un JSON</button><input ref={backupInputRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={event => { void importBackup(event.target.files?.[0]); }} aria-label="Choisir un fichier de sauvegarde JSON" /></div><p className="muted small" role="status">{backupBusy ? 'Traitement en cours…' : backupMessage || 'Avant toute restauration, exporte une sauvegarde de l’état actuel.'}</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 1-E.5</p><p className="muted small">{pwaStatus}</p><button type="button" className="secondary-button" disabled={checkingUpdate} onClick={() => void checkUpdateManually()}>{checkingUpdate ? "Vérification…" : "Rechercher une mise à jour"}</button><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
+          {!showProfile && !showLibrary && tab === 'Séance' && <section><div className="section-head"><div><p className="kicker">ENTRAÎNEMENT</p><h1>Séance</h1><p className="muted">Prépare et retrouve tes entraînements.</p></div></div><div className="panel highlighted"><span className="pill">SÉANCE DU JOUR · EXEMPLE</span><h2>Haut du corps</h2><p className="muted">6 exercices · 18 séries · repos personnalisés</p><div className="exercise-list"><div><span>01</span> Développé debout <small>3 × 10</small></div><div><span>02</span> Tirage horizontal <small>3 × 10</small></div><div><span>03</span> Curl biceps <small>3 × 12</small></div></div><div className="disabled-action">Démarrage disponible dans un prochain lot</div></div><div className="panel"><h2>Séance libre</h2><p className="muted">Musculation, cardio ou copie d'une séance existante.</p><div className="disabled-action">Création disponible dans un prochain lot</div></div></section>}
+          {!showProfile && !showLibrary && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><div className="panel"><div className="panel-heading"><h2>Semaine {week === 0 ? 'en cours' : week > 0 ? `+${week}` : week}</h2><div className="week-buttons"><button aria-label="Semaine précédente" onClick={() => setWeek(v => v - 1)}>‹</button><button aria-label="Semaine suivante" onClick={() => setWeek(v => v + 1)}>›</button></div></div><div className="calendar">{['L','M','M','J','V','S','D'].map((day, i) => <div className="calendar-day" key={`${day}-${i}`}><span>{day}</span><strong>{i + 9 + week * 7}</strong>{week === 0 && [1,3,5].includes(i) && <i className={i === 3 ? 'blue' : ''}/>}</div>)}</div><p className="muted small">Aperçu fictif du calendrier. Les dates et séances réelles seront calculées ultérieurement.</p></div><div className="panel"><h2>Programmes actifs</h2><div className="program"><div><strong>Cycle force & progression</strong><p className="muted">Exemple · 8 semaines</p></div><span className="pill">Semaine 3/8</span></div><div className="disabled-action">Éditeur disponible dans un prochain lot</div></div></section>}
+          {!showProfile && !showLibrary && tab === 'Stats' && <section><div className="section-head"><div><p className="kicker">ANALYSES</p><h1>Statistiques</h1><p className="muted">Suivi de la progression et répartition musculaire.</p></div></div><div className="metrics"><div className="metric"><span>Volume</span><strong>42</strong><small>séries · exemple</small></div><div className="metric"><span>Cardio</span><strong>85</strong><small>minutes · exemple</small></div></div><div className="panel"><h2>Progression récente</h2><p className="muted small">Illustration sans données réelles</p><div className="bars" aria-label="Graphique illustratif"><span style={{height:'38%'}}/><span style={{height:'51%'}}/><span style={{height:'47%'}}/><span style={{height:'70%'}}/><span style={{height:'65%'}}/><span style={{height:'83%'}}/><span style={{height:'94%'}}/></div></div><div className="panel"><h2>Analyse musculaire</h2><p className="muted">Carte corporelle interactive, séries directes et secondaires pondérées : intégration prévue dans les lots fonctionnels.</p><div className="disabled-action">Analyse indisponible dans cette démonstration</div></div></section>}
+          {!showProfile && !showLibrary && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel"><button className="menu-item menu-button" onClick={()=>setShowLibrary(true)}><div><strong>Bibliothèque d’exercices</strong><p className="muted">{STANDARD_EXERCISES.length} exercices préchargés · Consultation</p></div><span>→</span></button>{[['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>Sauvegarde et restauration</h2><p className="muted small">Sauvegarde JSON locale du profil, du thème et des exercices personnalisés. Aucun transfert vers un serveur. Enregistre une copie du fichier dans Fichiers ou sur un autre support.</p><div className="profile-actions"><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={exportBackup}>Exporter JSON</button><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={() => backupInputRef.current?.click()}>Restaurer un JSON</button><input ref={backupInputRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={event => { void importBackup(event.target.files?.[0]); }} aria-label="Choisir un fichier de sauvegarde JSON" /></div><p className="muted small" role="status">{backupBusy ? 'Traitement en cours…' : backupMessage || 'Avant toute restauration, exporte une sauvegarde de l’état actuel.'}</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 2-A.1</p><p className="muted small">{pwaStatus}</p><button type="button" className="secondary-button" disabled={checkingUpdate} onClick={() => void checkUpdateManually()}>{checkingUpdate ? "Vérification…" : "Rechercher une mise à jour"}</button><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
         </main>
-        <nav className="bottom-nav" aria-label="Navigation mobile">{tabs.map(item => <button type="button" key={item.label} className={tab === item.label && !showProfile ? 'active' : ''} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span><small>{item.label}</small></button>)}</nav>
+        <nav className="bottom-nav" aria-label="Navigation mobile">{tabs.map(item => <button type="button" key={item.label} className={tab === item.label && !showProfile && !showLibrary ? 'active' : ''} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span><small>{item.label}</small></button>)}</nav>
       </div>
     </div>
   );
