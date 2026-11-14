@@ -44,8 +44,8 @@ jobs:
           echo "=== Fichiers dans dist ==="
           find dist -maxdepth 3 -type f
           echo "=== Vérification des icônes ==="
-          test -f dist/icons/icon-192.png
-          test -f dist/icons/icon-512.png
+          test -f dist/Icons/icon-192.png
+          test -f dist/Icons/icon-512.png
 
 
       - name: Setup Pages
