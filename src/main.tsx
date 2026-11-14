@@ -68,14 +68,107 @@ function validExercise(x: unknown): x is Exercise {
     Array.isArray(e.equipment) && e.equipment.length<=20 && e.equipment.every(v=>typeof v==='string'&&v.length<=60);
 }
 
+// Lot 2-B.1 — Modèles séparés des séances, programmes et affectations datées.
+// Les objectifs sont des prescriptions, jamais des performances réalisées.
+type WorkoutTarget = {
+  exerciseId: string; order: number; sets?: number; reps?: number;
+  loadKg?: number; restSeconds?: number; rir?: number;
+  durationMinutes?: number; distanceKm?: number; supersetId?: string;
+};
+type WorkoutTemplate = {
+  id: string; name: string; description: string; targets: WorkoutTarget[];
+  archived: boolean; createdAt: string; updatedAt: string;
+};
+type TrainingProgram = {
+  id: string; name: string; description: string; templateIds: string[];
+  archived: boolean; createdAt: string; updatedAt: string;
+};
+type PlannedWorkout = {
+  id: string; date: string; templateId: string; programId: string | null;
+  status: 'planned' | 'cancelled'; createdAt: string; updatedAt: string;
+};
+const MAX_PLANNING_RECORDS = 1000;
+function validIsoDate(v: unknown): v is string {
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) &&
+    !Number.isNaN(Date.parse(v)) && new Date(v + 'T12:00:00Z').toISOString().slice(0,10) === v;
+}
+function validTarget(x: unknown): x is WorkoutTarget {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return false;
+  const t = x as WorkoutTarget;
+  const numberField = (v: unknown, max: number) => v === undefined || (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max);
+  return typeof t.exerciseId === 'string' && t.exerciseId.length > 0 && t.exerciseId.length <= 128 &&
+    Number.isInteger(t.order) && t.order >= 0 && t.order <= 200 &&
+    numberField(t.sets, 100) && numberField(t.reps, 1000) && numberField(t.loadKg, 10000) &&
+    numberField(t.restSeconds, 3600) && numberField(t.rir, 20) &&
+    numberField(t.durationMinutes, 1440) && numberField(t.distanceKm, 1000) &&
+    (t.supersetId === undefined || (typeof t.supersetId === 'string' && t.supersetId.length <= 128));
+}
+function validTemplate(x: unknown): x is WorkoutTemplate {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return false;
+  const t = x as WorkoutTemplate;
+  return typeof t.id === 'string' && t.id.length > 0 && t.id.length <= 128 &&
+    typeof t.name === 'string' && !!t.name.trim() && t.name.length <= 100 &&
+    typeof t.description === 'string' && t.description.length <= 1000 &&
+    typeof t.archived === 'boolean' && validDate(t.createdAt) && validDate(t.updatedAt) &&
+    Array.isArray(t.targets) && t.targets.length <= 200 && t.targets.every(validTarget);
+}
+function validProgram(x: unknown): x is TrainingProgram {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return false;
+  const p = x as TrainingProgram;
+  return typeof p.id === 'string' && p.id.length > 0 && p.id.length <= 128 &&
+    typeof p.name === 'string' && !!p.name.trim() && p.name.length <= 100 &&
+    typeof p.description === 'string' && p.description.length <= 1000 &&
+    typeof p.archived === 'boolean' && validDate(p.createdAt) && validDate(p.updatedAt) &&
+    Array.isArray(p.templateIds) && p.templateIds.length <= 200 &&
+    p.templateIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128);
+}
+function validPlanned(x: unknown): x is PlannedWorkout {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return false;
+  const p = x as PlannedWorkout;
+  return typeof p.id === 'string' && p.id.length > 0 && p.id.length <= 128 &&
+    validIsoDate(p.date) && typeof p.templateId === 'string' && !!p.templateId && p.templateId.length <= 128 &&
+    (p.programId === null || (typeof p.programId === 'string' && p.programId.length > 0 && p.programId.length <= 128)) &&
+    (p.status === 'planned' || p.status === 'cancelled') && validDate(p.createdAt) && validDate(p.updatedAt);
+}
+function validPlanning(templates: unknown, programs: unknown, planned: unknown): boolean {
+  if (!Array.isArray(templates) || !Array.isArray(programs) || !Array.isArray(planned) ||
+    templates.length > MAX_PLANNING_RECORDS || programs.length > MAX_PLANNING_RECORDS || planned.length > MAX_PLANNING_RECORDS ||
+    !templates.every(validTemplate) || !programs.every(validProgram) || !planned.every(validPlanned)) return false;
+  const unique = (items: {id:string}[]) => new Set(items.map(x=>x.id)).size === items.length;
+  if (!unique(templates) || !unique(programs) || !unique(planned)) return false;
+  const tids = new Set(templates.map(x=>x.id));
+  const pids = new Set(programs.map(x=>x.id));
+  return programs.every(x=>x.templateIds.every((id:string)=>tids.has(id))) &&
+    planned.every(x=>tids.has(x.templateId) && (x.programId === null || pids.has(x.programId)));
+}
+function readAll<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
+  return new Promise((resolve,reject)=>{
+    try { const tx=db.transaction(storeName,'readonly'); let items:T[]=[];
+      tx.objectStore(storeName).getAll().onsuccess=e=>{items=(e.target as IDBRequest<T[]>).result;};
+      tx.oncomplete=()=>resolve(items);
+      tx.onerror=()=>reject(tx.error || new Error('Lecture du planning impossible.'));
+      tx.onabort=()=>reject(tx.error || new Error('Lecture du planning interrompue.'));
+    } catch(e) { reject(e); }
+  });
+}
+async function readPlanning(db: IDBDatabase) {
+  const [templates, programs, planned] = await Promise.all([
+    readAll<WorkoutTemplate>(db,'workoutTemplates'),
+    readAll<TrainingProgram>(db,'trainingPrograms'),
+    readAll<PlannedWorkout>(db,'plannedWorkouts'),
+  ]);
+  if (!validPlanning(templates,programs,planned)) throw new Error('Données de planification incohérentes.');
+  return {templates,programs,planned};
+}
+
 // Lot 1-C : profil unique actif, stockage local IndexedDB versionné.
 // Le profil est créé uniquement si la base ne contient encore aucun profil.
 type Theme = 'dark' | 'light' | 'system';
 type LocalProfile = { id: string; name: string; createdAt: string; updatedAt: string };
 type LocalSettings = { id: string; profileId: string; theme: Theme; updatedAt: string };
 const DB_NAME = 'lifetrack-training';
-const DB_VERSION = 3;
-const DATA_SCHEMA_VERSION = 2; // Format logique des données, indépendant de la version IndexedDB.
+const DB_VERSION = 4;
+const DATA_SCHEMA_VERSION = 3; // Format logique des données, indépendant de la version IndexedDB.
 type SchemaMetadata = { id: 'schema'; version: number; updatedAt: string };
 const SETTINGS_KEY = 'preferences';
 function openDatabase(): Promise<IDBDatabase> {
@@ -87,6 +180,9 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('profiles')) db.createObjectStore('profiles', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('customExercises')) db.createObjectStore('customExercises', { keyPath: 'id' });
+      for (const store of ['workoutTemplates','trainingPrograms','plannedWorkouts']) {
+        if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' });
+      }
       // Migration additive : aucun effacement des profils ni des préférences existants.
       const meta = db.objectStoreNames.contains('metadata')
         ? request.transaction!.objectStore('metadata')
@@ -175,7 +271,7 @@ async function loadLocalData(): Promise<{ db: IDBDatabase; profile: LocalProfile
 }
 // Lot 1-E.2 : sauvegarde portable et restauration transactionnelle.
 const BACKUP_FORMAT = 'lifetrack-training-backup';
-const BACKUP_VERSION = 2;
+const BACKUP_VERSION = 3;
 type BackupDocument = {
   format: typeof BACKUP_FORMAT;
   version: number;
@@ -184,6 +280,9 @@ type BackupDocument = {
   profile: LocalProfile;
   settings: LocalSettings;
   customExercises?: Exercise[];
+  workoutTemplates?: WorkoutTemplate[];
+  trainingPrograms?: TrainingProgram[];
+  plannedWorkouts?: PlannedWorkout[];
 };
 function validDate(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
@@ -191,7 +290,7 @@ function validDate(value: unknown): value is string {
 function validateBackup(value: unknown): BackupDocument {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Fichier JSON invalide.');
   const raw = value as Record<string, unknown>;
-  if (raw.format !== BACKUP_FORMAT || ![1, BACKUP_VERSION].includes(Number(raw.version)) || ![1, DATA_SCHEMA_VERSION].includes(Number(raw.dataSchemaVersion))) {
+  if (raw.format !== BACKUP_FORMAT || ![1, 2, BACKUP_VERSION].includes(Number(raw.version)) || ![1, 2, DATA_SCHEMA_VERSION].includes(Number(raw.dataSchemaVersion))) {
     throw new Error('Format ou version de sauvegarde incompatible. Aucune donnée modifiée.');
   }
   if (!validDate(raw.exportedAt)) throw new Error('Date d’export invalide.');
@@ -208,10 +307,13 @@ function validateBackup(value: unknown): BackupDocument {
       !['dark', 'light', 'system'].includes(String(pref.theme)) || !validDate(pref.updatedAt)) {
     throw new Error('Préférences de sauvegarde invalides.');
   }
-  if (raw.version === 2 && (raw.dataSchemaVersion !== DATA_SCHEMA_VERSION || !Array.isArray(raw.customExercises) ||
+  if ((raw.version === 2 || raw.version === 3) && (raw.dataSchemaVersion !== (raw.version === 2 ? 2 : 3) || !Array.isArray(raw.customExercises) ||
       raw.customExercises.length > 500 || !raw.customExercises.every(validExercise) ||
       new Set((raw.customExercises as Exercise[]).map(e=>e.id)).size !== raw.customExercises.length)) {
     throw new Error('Bibliothèque personnalisée de sauvegarde invalide.');
+  }
+  if (raw.version === 3 && !validPlanning(raw.workoutTemplates,raw.trainingPrograms,raw.plannedWorkouts)) {
+    throw new Error('Données de programmes de sauvegarde invalides.');
   }
   if (raw.version === 1 && raw.dataSchemaVersion !== 1) throw new Error('Ancien schéma JSON incompatible.');
   return raw as unknown as BackupDocument;
@@ -220,16 +322,27 @@ function restoreBackup(db: IDBDatabase, backup: BackupDocument): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       // Une seule transaction : aucun état partiellement restauré en cas d'échec.
-      const tx = db.transaction(['profiles', 'settings', 'customExercises'], 'readwrite');
+      const tx = db.transaction(['profiles', 'settings', 'customExercises', 'workoutTemplates', 'trainingPrograms', 'plannedWorkouts'], 'readwrite');
       const profiles = tx.objectStore('profiles');
       const settings = tx.objectStore('settings');
       profiles.clear();
       profiles.put(backup.profile);
       settings.put(backup.settings);
       // Ancien JSON : ne jamais effacer les exercices créés depuis son export.
-      if (backup.version === 2) {
+      if (backup.version >= 2) {
         const exercises = tx.objectStore('customExercises'); exercises.clear();
         for (const exercise of backup.customExercises || []) exercises.put(exercise);
+      }
+      // Les anciennes sauvegardes conservent le planning local actuel.
+      if (backup.version === 3) {
+        for (const [store, items] of [
+          ['workoutTemplates', backup.workoutTemplates || []],
+          ['trainingPrograms', backup.trainingPrograms || []],
+          ['plannedWorkouts', backup.plannedWorkouts || []],
+        ] as const) {
+          const target = tx.objectStore(store); target.clear();
+          for (const item of items) target.put(item);
+        }
       }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Restauration impossible.'));
@@ -245,6 +358,7 @@ function App() {
   const [tab, setTab] = useState<Tab>('Accueil');
   const [showLibrary, setShowLibrary] = useState(false);
   const [customExercises, setCustomExercises] = useState<Exercise[]>([]);
+  const [planningCounts, setPlanningCounts] = useState({templates:0, programs:0, planned:0});
   const [librarySearch, setLibrarySearch] = useState('');
   const [libraryKind, setLibraryKind] = useState('all');
   const [libraryMuscle, setLibraryMuscle] = useState('all');
@@ -419,6 +533,8 @@ function App() {
       setProfile(storedProfile);
       setProfileName(storedProfile.name);
       setTheme(settings.theme);
+      readPlanning(db).then(data => { if (!cancelled) setPlanningCounts({templates:data.templates.length,programs:data.programs.length,planned:data.planned.length}); })
+        .catch(error => { if (!cancelled) setStorageError('Planning : ' + describeError(error)); });
       readCustomExercises(db).then(items => { if (!cancelled) setCustomExercises(items); })
         .catch(error => { if (!cancelled) setLibraryError(describeError(error)); });
       setStorageStatus('ready');
@@ -472,10 +588,12 @@ function App() {
       if (exercisesToExport.length > 500 || exercisesToExport.some(e => !validExercise(e))) {
         throw new Error('Bibliothèque locale incohérente : export interrompu.');
       }
+      const planning = await readPlanning(dbRef.current);
       const backup: BackupDocument = {
         format: BACKUP_FORMAT, version: BACKUP_VERSION,
         exportedAt: new Date().toISOString(), dataSchemaVersion: DATA_SCHEMA_VERSION,
         profile: profiles[0], settings: storedSettings, customExercises: exercisesToExport,
+        workoutTemplates: planning.templates, trainingPrograms: planning.programs, plannedWorkouts: planning.planned,
       };
       validateBackup(backup);
       const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
@@ -496,10 +614,13 @@ function App() {
     try {
       if (file.size > 1024 * 1024) throw new Error('Fichier trop volumineux (maximum 1 Mo).');
       const backup = validateBackup(JSON.parse(await file.text()) as unknown);
-      const libraryWarning = backup.version === 2
+      const libraryWarning = backup.version >= 2
         ? `La bibliothèque personnalisée actuelle sera remplacée par ${backup.customExercises?.length ?? 0} exercice(s) du fichier.`
         : 'Ancienne sauvegarde : les exercices personnalisés actuels seront conservés.';
-      if (!window.confirm(`Restaurer le profil « ${backup.profile.name} » et son thème ?\n\n${libraryWarning}\n\nExporte une sauvegarde de l’état actuel avant de continuer.`)) {
+      const planningWarning = backup.version === 3
+        ? 'Les séances types, programmes et affectations locales seront remplacés.'
+        : 'Les séances types, programmes et affectations locales seront conservés.';
+      if (!window.confirm(`Restaurer le profil « ${backup.profile.name} » et son thème ?\n\n${libraryWarning}\n${planningWarning}\n\nExporte une sauvegarde de l’état actuel avant de continuer.`)) {
         setBackupMessage('Restauration annulée : aucune donnée modifiée.');
         return;
       }
@@ -515,11 +636,18 @@ function App() {
       setProfileName(profiles[0].name);
       setTheme(settings.theme);
       const restoredExercises = await readCustomExercises(dbRef.current);
-      if (backup.version === 2 && (restoredExercises.length !== backup.customExercises?.length ||
+      if (backup.version >= 2 && (restoredExercises.length !== backup.customExercises?.length ||
         !restoredExercises.every(e => backup.customExercises?.some(expected => JSON.stringify(expected) === JSON.stringify(e))))) {
         throw new Error('Contrôle de relecture de la bibliothèque non conforme.');
       }
       setCustomExercises(restoredExercises);
+      const verifiedPlanning = await readPlanning(dbRef.current);
+      if (backup.version === 3 && (JSON.stringify(verifiedPlanning.templates) !== JSON.stringify(backup.workoutTemplates) ||
+          JSON.stringify(verifiedPlanning.programs) !== JSON.stringify(backup.trainingPrograms) ||
+          JSON.stringify(verifiedPlanning.planned) !== JSON.stringify(backup.plannedWorkouts))) {
+        throw new Error('Contrôle de relecture du planning non conforme.');
+      }
+      setPlanningCounts({templates:verifiedPlanning.templates.length,programs:verifiedPlanning.programs.length,planned:verifiedPlanning.planned.length});
       setStorageDetail('Restauration contrôlée · ' + new Date().toLocaleTimeString('fr-FR'));
       setBackupMessage('Restauration réussie : profil et thème relus depuis IndexedDB.');
     } catch (error) { setBackupMessage('Restauration refusée : ' + describeError(error)); }
@@ -591,9 +719,9 @@ function App() {
             <div className="panel"><div className="panel-heading"><h2>Programme</h2><button className="text-button" onClick={() => navigate('Programmes')}>Calendrier →</button></div><div className="timeline"><span className="timeline-dot"/><div><strong>Demain · Cardio</strong><p>Vélo · 40 min · séance planifiée</p></div></div><div className="timeline"><span className="timeline-dot lime"/><div><strong>Samedi · Full body</strong><p>Musculation · 60 min</p></div></div></div>
           </section>}
           {!showProfile && !showLibrary && tab === 'Séance' && <section><div className="section-head"><div><p className="kicker">ENTRAÎNEMENT</p><h1>Séance</h1><p className="muted">Prépare et retrouve tes entraînements.</p></div></div><div className="panel highlighted"><span className="pill">SÉANCE DU JOUR · EXEMPLE</span><h2>Haut du corps</h2><p className="muted">6 exercices · 18 séries · repos personnalisés</p><div className="exercise-list"><div><span>01</span> Développé debout <small>3 × 10</small></div><div><span>02</span> Tirage horizontal <small>3 × 10</small></div><div><span>03</span> Curl biceps <small>3 × 12</small></div></div><div className="disabled-action">Démarrage disponible dans un prochain lot</div></div><div className="panel"><h2>Séance libre</h2><p className="muted">Musculation, cardio ou copie d'une séance existante.</p><div className="disabled-action">Création disponible dans un prochain lot</div></div></section>}
-          {!showProfile && !showLibrary && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><div className="panel"><div className="panel-heading"><h2>Semaine {week === 0 ? 'en cours' : week > 0 ? `+${week}` : week}</h2><div className="week-buttons"><button aria-label="Semaine précédente" onClick={() => setWeek(v => v - 1)}>‹</button><button aria-label="Semaine suivante" onClick={() => setWeek(v => v + 1)}>›</button></div></div><div className="calendar">{['L','M','M','J','V','S','D'].map((day, i) => <div className="calendar-day" key={`${day}-${i}`}><span>{day}</span><strong>{i + 9 + week * 7}</strong>{week === 0 && [1,3,5].includes(i) && <i className={i === 3 ? 'blue' : ''}/>}</div>)}</div><p className="muted small">Aperçu fictif du calendrier. Les dates et séances réelles seront calculées ultérieurement.</p></div><div className="panel"><h2>Programmes actifs</h2><div className="program"><div><strong>Cycle force & progression</strong><p className="muted">Exemple · 8 semaines</p></div><span className="pill">Semaine 3/8</span></div><div className="disabled-action">Éditeur disponible dans un prochain lot</div></div></section>}
+          {!showProfile && !showLibrary && tab === 'Programmes' && <section><div className="section-head"><div><p className="kicker">PLANIFICATION</p><h1>Programmes</h1><p className="muted">Calendrier global et cycles multisemaines.</p></div></div><div className="panel"><div className="panel-heading"><h2>Semaine {week === 0 ? 'en cours' : week > 0 ? `+${week}` : week}</h2><div className="week-buttons"><button aria-label="Semaine précédente" onClick={() => setWeek(v => v - 1)}>‹</button><button aria-label="Semaine suivante" onClick={() => setWeek(v => v + 1)}>›</button></div></div><div className="calendar">{['L','M','M','J','V','S','D'].map((day, i) => <div className="calendar-day" key={`${day}-${i}`}><span>{day}</span><strong>{i + 9 + week * 7}</strong>{week === 0 && [1,3,5].includes(i) && <i className={i === 3 ? 'blue' : ''}/>}</div>)}</div><p className="muted small">Calendrier de démonstration : les affectations datées réelles seront affichées dans un prochain lot.</p></div><div className="panel"><h2>Programmes actifs</h2><div className="program"><div><strong>Cycle force & progression</strong><p className="muted">Exemple · 8 semaines</p></div><span className="pill">Semaine 3/8</span></div><div className="disabled-action">Éditeur disponible dans un prochain lot</div><p className="muted small">Fondations 2-B.1 : {planningCounts.templates} séance(s) type(s) · {planningCounts.programs} programme(s) · {planningCounts.planned} affectation(s) datée(s) enregistrés.</p></div></section>}
           {!showProfile && !showLibrary && tab === 'Stats' && <section><div className="section-head"><div><p className="kicker">ANALYSES</p><h1>Statistiques</h1><p className="muted">Suivi de la progression et répartition musculaire.</p></div></div><div className="metrics"><div className="metric"><span>Volume</span><strong>42</strong><small>séries · exemple</small></div><div className="metric"><span>Cardio</span><strong>85</strong><small>minutes · exemple</small></div></div><div className="panel"><h2>Progression récente</h2><p className="muted small">Illustration sans données réelles</p><div className="bars" aria-label="Graphique illustratif"><span style={{height:'38%'}}/><span style={{height:'51%'}}/><span style={{height:'47%'}}/><span style={{height:'70%'}}/><span style={{height:'65%'}}/><span style={{height:'83%'}}/><span style={{height:'94%'}}/></div></div><div className="panel"><h2>Analyse musculaire</h2><p className="muted">Carte corporelle interactive, séries directes et secondaires pondérées : intégration prévue dans les lots fonctionnels.</p><div className="disabled-action">Analyse indisponible dans cette démonstration</div></div></section>}
-          {!showProfile && !showLibrary && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel"><button className="menu-item menu-button" onClick={()=>setShowLibrary(true)}><div><strong>Bibliothèque d’exercices</strong><p className="muted">{STANDARD_EXERCISES.length} exercices préchargés · Création et édition</p></div><span>→</span></button>{[['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>Sauvegarde et restauration</h2><p className="muted small">Sauvegarde JSON locale du profil, du thème et des exercices personnalisés. Aucun transfert vers un serveur. Enregistre une copie du fichier dans Fichiers ou sur un autre support.</p><div className="profile-actions"><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={exportBackup}>Exporter JSON</button><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={() => backupInputRef.current?.click()}>Restaurer un JSON</button><input ref={backupInputRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={event => { void importBackup(event.target.files?.[0]); }} aria-label="Choisir un fichier de sauvegarde JSON" /></div><p className="muted small" role="status">{backupBusy ? 'Traitement en cours…' : backupMessage || 'Avant toute restauration, exporte une sauvegarde de l’état actuel.'}</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 2-A.4</p><p className="muted small">{pwaStatus}</p><button type="button" className="secondary-button" disabled={checkingUpdate} onClick={() => void checkUpdateManually()}>{checkingUpdate ? "Vérification…" : "Rechercher une mise à jour"}</button><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
+          {!showProfile && !showLibrary && tab === 'Plus' && <section><div className="section-head"><div><p className="kicker">PERSONNALISATION</p><h1>Plus</h1><p className="muted">Bibliothèques, matériel et réglages.</p></div></div><div className="panel menu-panel"><button className="menu-item menu-button" onClick={()=>setShowLibrary(true)}><div><strong>Bibliothèque d’exercices</strong><p className="muted">{STANDARD_EXERCISES.length} exercices préchargés · Création et édition</p></div><span>→</span></button>{[['Matériel','Inventaire et configurations'],['Séances types','Modèles réutilisables']].map(([name, description]) => <div className="menu-item" key={name}><div><strong>{name}</strong><p className="muted">{description}</p></div><span>À venir</span></div>)}<button className="menu-item menu-button" onClick={() => setShowProfile(true)}><div><strong>Profil</strong><p className="muted">Profil local actif</p></div><span>→</span></button></div><div className="panel"><h2>Apparence</h2><div className="theme-choices" role="group" aria-label="Thème de l'application">{(['dark','light','system'] as const).map(value => <button key={value} className={theme === value ? 'selected' : ''} disabled={storageStatus !== 'ready' || saving} onClick={() => saveTheme(value)}>{value === 'dark' ? 'Sombre' : value === 'light' ? 'Clair' : 'Système'}</button>)}</div><p className="muted small">Thème enregistré dans IndexedDB et restauré à la prochaine ouverture.</p></div><div className="panel"><h2>Sauvegarde et restauration</h2><p className="muted small">Sauvegarde JSON locale du profil, du thème et des exercices personnalisés. Aucun transfert vers un serveur. Enregistre une copie du fichier dans Fichiers ou sur un autre support.</p><div className="profile-actions"><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={exportBackup}>Exporter JSON</button><button type="button" className="secondary-button" disabled={storageStatus !== 'ready' || saving || backupBusy} onClick={() => backupInputRef.current?.click()}>Restaurer un JSON</button><input ref={backupInputRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={event => { void importBackup(event.target.files?.[0]); }} aria-label="Choisir un fichier de sauvegarde JSON" /></div><p className="muted small" role="status">{backupBusy ? 'Traitement en cours…' : backupMessage || 'Avant toute restauration, exporte une sauvegarde de l’état actuel.'}</p></div><div className="panel"><h2>À propos</h2><p><strong>LifeTrack Training</strong> · V0.1 — Lot 2-B.1</p><p className="muted small">{pwaStatus}</p><button type="button" className="secondary-button" disabled={checkingUpdate} onClick={() => void checkUpdateManually()}>{checkingUpdate ? "Vérification…" : "Rechercher une mise à jour"}</button><p className="muted small">Pour installer sur iPhone : Safari → Partager → Sur l’écran d’accueil. Ouvre une première fois en ligne avant le test hors ligne.</p></div></section>}
         </main>
         <nav className="bottom-nav" aria-label="Navigation mobile">{tabs.map(item => <button type="button" key={item.label} className={tab === item.label && !showProfile && !showLibrary ? 'active' : ''} onClick={() => navigate(item.label)}><span aria-hidden="true">{item.icon}</span><small>{item.label}</small></button>)}</nav>
       </div>
