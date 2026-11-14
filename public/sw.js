@@ -1,6 +1,6 @@
 
 /* LifeTrack Training — Lot 1-D. Cache isolé par nom et version. */
-const VERSION = '0.1.0-l2a1';
+const VERSION = '0.1.0-l2a2';
 const PREFIX = 'lifetrack-training-pwa-';
 const CACHE = PREFIX + VERSION;
 const ROOT = new URL('./', self.location.href).pathname;
