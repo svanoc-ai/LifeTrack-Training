@@ -37,6 +37,17 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Diagnostic PWA files
+        run: |
+          echo "=== Fichiers dans public ==="
+          find public -maxdepth 3 -type f
+          echo "=== Fichiers dans dist ==="
+          find dist -maxdepth 3 -type f
+          echo "=== Vérification des icônes ==="
+          test -f dist/icons/icon-192.png
+          test -f dist/icons/icon-512.png
+
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
