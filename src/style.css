@@ -123,3 +123,10 @@ button:disabled{opacity:.55;cursor:not-allowed}
 
 /* Lot 2-C.1.2 — historique de séances */
 .execution-history{margin-top:22px;border-top:1px solid var(--border,#ccd);padding-top:16px}.execution-history-item{margin:10px 0}.execution-history-item>button{width:100%;text-align:left;white-space:normal;overflow-wrap:anywhere}.execution-history-detail{padding:10px 12px;border:1px solid var(--border,#ccd);border-radius:10px;margin-top:6px}.execution-history-detail ul{padding-left:22px}.execution-dialog .profile-input{max-width:100%;min-width:0;box-sizing:border-box}
+
+/* 2-C.2 — Exécution immersive, mobile first */
+.immersive-exercise{border:1px solid var(--border,rgba(127,127,127,.2));border-radius:18px;padding:14px;margin:14px 0;background:var(--surface-2,rgba(127,127,127,.05))}.immersive-heading,.immersive-navigation{display:flex;align-items:center;justify-content:space-between;gap:10px}.immersive-heading button{font-size:.85rem}.immersive-exercise h3{font-size:1.4rem;margin:18px 0 6px}.immersive-sets{display:grid;gap:12px;margin:18px 0}.immersive-set{background:var(--bg,transparent);border:1px solid rgba(127,127,127,.2);padding:12px;border-radius:12px}.immersive-set>button{margin-top:10px;width:100%}.immersive-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px}.immersive-fields label{min-width:0;font-size:.8rem}.immersive-fields .profile-input{width:100%;min-width:0;box-sizing:border-box;margin-top:5px;padding:10px 5px;font-size:16px}.immersive-list{display:grid;gap:6px;margin:12px 0}.immersive-list button{text-align:left;white-space:normal}.immersive-navigation{margin:16px 0}.immersive-navigation button{flex:1;min-width:0}@media(max-width:360px){.immersive-fields{gap:4px}.immersive-set{padding:8px}.immersive-heading{flex-wrap:wrap}}
+
+/* 2-C.2.1 — adjustment of the number of sets during execution */
+.immersive-set-controls{display:flex;flex-wrap:wrap;gap:0.6rem;margin:0.85rem 0}
+.immersive-set-controls button{flex:1 1 140px}
