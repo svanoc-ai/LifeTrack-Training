@@ -1,0 +1,25 @@
+name: Verify LifeTrack Training 2-C.2
+
+on:
+  push:
+    branches:
+      - test-2-C-2-1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm install
+      - name: Check TypeScript and build Vite
+        run: npm run build
